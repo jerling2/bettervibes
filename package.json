@@ -1,0 +1,29 @@
+{
+  "name": "bettervibes",
+  "version": "0.0.1",
+  "main": "dist/index.js",
+  "bin": {
+    "bettervibes": "dist/cli/bettervibes.js"
+  },
+  "scripts": {
+    "build": "tsc && chmod +x dist/cli/bettervibes.js",
+    "dev": "ts-node src/cli/bettervibes.ts",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "@langchain/core": "^0.3.0",
+    "@langchain/langgraph": "^0.2.0",
+    "@langchain/langgraph-checkpoint-sqlite": "^0.1.5",
+    "zod": "^3.25.32"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.0.0",
+    "jest": "^30.3.0",
+    "jest-environment-node": "^30.3.0",
+    "ts-jest": "^29.4.0",
+    "ts-node": "^10.0.0",
+    "typescript": "^5.0.0"
+  }
+}
