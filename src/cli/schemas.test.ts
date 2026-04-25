@@ -124,4 +124,16 @@ describe('CliOutput', () => {
       CliOutput.parse({ status: 'interrupted', task_id: 'smoke' })
     ).toThrow();
   });
+
+  it('accepts a no_active_task event with a message', () => {
+    const payload = {
+      status: 'no_active_task',
+      message: 'no in-progress task to resume',
+    };
+    expect(CliOutput.parse(payload)).toEqual(payload);
+  });
+
+  it('rejects a no_active_task event without a message', () => {
+    expect(() => CliOutput.parse({ status: 'no_active_task' })).toThrow();
+  });
 });

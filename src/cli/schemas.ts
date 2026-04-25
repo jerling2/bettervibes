@@ -88,6 +88,10 @@ export const CliOutput = z.union([
     task_id: z.string(),
     iterations: z.number().int().nonnegative(),
   }),
+  z.object({
+    status: z.literal('no_active_task'),
+    message: z.string(),
+  }),
 ]);
 
 export type CliOutputType = z.infer<typeof CliOutput>;

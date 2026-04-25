@@ -399,6 +399,62 @@ describe('runCli — resume mode', () => {
       { status: 'done', task_id: 'smoke', iterations: 1 },
     ]);
   });
+
+  it('accepts pretty-printed multi-line resume JSON', async () => {
+    const checkpointer = new MemorySaver();
+    await primeToHumanReview(checkpointer);
+
+    mockQuery.mockReset();
+    mockQuery.mockImplementation(queryInvokingTool('mark_done', {}));
+
+    // Same payload as the redlight test, but spread across multiple lines —
+    // exactly the shape a human pipes from a heredoc or `cat feedback.json`.
+    const prettyJson = JSON.stringify(
+      { decision: 'redlight', feedback: 'missing acceptance criteria' },
+      null,
+      2
+    );
+    expect(prettyJson).toContain('\n');
+
+    const stdio = makeStdio();
+    stdio.stdin.write(`${prettyJson}\n`);
+    stdio.stdin.end();
+
+    const exit = await runCli(
+      makeDeps({ argv: ['resume'], stdio, checkpointer })
+    );
+    expect(exit).toBe(0);
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    const lines = stdio.getStdoutLines().map((l) => JSON.parse(l));
+    expect(lines).toEqual([
+      { status: 'done', task_id: 'smoke', iterations: 1 },
+    ]);
+  });
+
+  it('emits no_active_task and exits 2 when the checkpoint has nothing to resume', async () => {
+    // Fresh checkpointer — no `bettervibes run` has happened, so there is no
+    // pending interrupt for `resume` to act on. The bug we are guarding
+    // against: previously the runner would invoke the graph anyway and emit
+    // `{status:"done", task_id:"", iterations:0}`, which looked like success.
+    const checkpointer = new MemorySaver();
+
+    const stdio = makeStdio();
+    stdio.stdin.write('{"decision":"greenlight"}\n');
+    stdio.stdin.end();
+
+    const exit = await runCli(
+      makeDeps({ argv: ['resume'], stdio, checkpointer })
+    );
+    expect(exit).toBe(2);
+    expect(mockQuery).not.toHaveBeenCalled();
+    const lines = stdio.getStdoutLines().map((l) => JSON.parse(l));
+    expect(lines).toEqual([
+      {
+        status: 'no_active_task',
+        message: expect.stringMatching(/no in-progress task to resume/),
+      },
+    ]);
+  });
 });
 
 // ============================================================================

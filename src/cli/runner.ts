@@ -129,53 +129,132 @@ function mapInterruptToCliOutput(payload: unknown): CliOutputType {
 }
 
 /**
+ * Result of `readJsonValue()` — `kind:'value'` carries the parsed JSON and
+ * the raw text we parsed; `kind:'empty'` means EOF was reached with no
+ * non-whitespace input; `kind:'error'` carries the final parse failure plus
+ * the raw text so the caller can echo it.
+ */
+type JsonReadResult =
+  | { kind: 'value'; value: unknown; raw: string }
+  | { kind: 'empty' }
+  | { kind: 'error'; error: Error; raw: string };
+
+/**
  * Wraps a `readline.Interface` in a small state machine supporting two
  * sequential modes:
- *  1. *resume-line read* — `readOneLine()` returns the next line exactly once.
+ *  1. *resume-JSON read* — `readJsonValue()` accumulates lines until either
+ *     `JSON.parse` succeeds on the buffered text or stdin closes. Pretty-
+ *     printed multi-line JSON is supported; the buffer terminates at the
+ *     first complete value.
  *  2. *dispatch* — after `startDispatch(handler)` is called, every subsequent
  *     line is handed to `handler` until `close()`.
  *
  * @remarks
  * Keeps all stdin ingestion through one `line` event listener so readline's
- * internal buffering stays consistent. The two modes are strictly sequential;
- * lines never cross channels.
+ * internal buffering stays consistent. Lines that arrive in dispatch mode
+ * before `startDispatch` is called are queued and flushed when it is set, so
+ * a fast-arriving permission_response cannot be dropped between modes.
  */
 function createStdinReader(input: NodeJS.ReadableStream) {
   const rl = readline.createInterface({ input, crlfDelay: Infinity });
-  let resumeResolver: ((line: string) => void) | null = null;
+  type Mode = 'json' | 'dispatch';
+  let mode: Mode = 'json';
+  let jsonBuffer = '';
+  let jsonResolver: ((r: JsonReadResult) => void) | null = null;
+  // Holds a settled JSON result that arrived before `readJsonValue()` was
+  // called (e.g. tests that pre-write to stdin) so the next call still sees it.
+  let cachedResult: JsonReadResult | null = null;
   let dispatch: ((line: string) => void) | null = null;
+  const dispatchQueue: string[] = [];
   let closed = false;
 
+  function settleJson(result: JsonReadResult) {
+    const r = jsonResolver;
+    jsonResolver = null;
+    jsonBuffer = '';
+    mode = 'dispatch';
+    if (r) {
+      r(result);
+    } else {
+      cachedResult = result;
+    }
+  }
+
+  function tryParseBuffered(): boolean {
+    const trimmed = jsonBuffer.trim();
+    if (!trimmed) return false;
+    try {
+      const value = JSON.parse(trimmed);
+      settleJson({ kind: 'value', value, raw: trimmed });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function drainOnClose(): JsonReadResult {
+    const trimmed = jsonBuffer.trim();
+    if (!trimmed) return { kind: 'empty' };
+    try {
+      const value = JSON.parse(trimmed);
+      return { kind: 'value', value, raw: trimmed };
+    } catch (e) {
+      return { kind: 'error', error: e as Error, raw: trimmed };
+    }
+  }
+
   rl.on('line', (line) => {
-    if (resumeResolver) {
-      const r = resumeResolver;
-      resumeResolver = null;
-      r(line);
+    if (mode === 'json') {
+      jsonBuffer += jsonBuffer ? `\n${line}` : line;
+      tryParseBuffered();
       return;
     }
     if (dispatch) {
       dispatch(line);
+    } else {
+      dispatchQueue.push(line);
     }
   });
 
   rl.on('close', () => {
     closed = true;
-    if (resumeResolver) {
-      const r = resumeResolver;
-      resumeResolver = null;
-      r('');
+    if (mode === 'json') {
+      // Settle whatever's buffered. If no consumer is waiting yet, the result
+      // is cached and replayed by the next `readJsonValue()` call.
+      settleJson(drainOnClose());
     }
   });
 
   return {
-    readOneLine(): Promise<string | null> {
-      if (closed) return Promise.resolve(null);
-      return new Promise<string>((resolve) => {
-        resumeResolver = resolve;
-      }).then((line) => (closed && line === '' ? null : line));
+    readJsonValue(): Promise<JsonReadResult> {
+      if (cachedResult !== null) {
+        const r = cachedResult;
+        cachedResult = null;
+        return Promise.resolve(r);
+      }
+      return new Promise<JsonReadResult>((resolve) => {
+        jsonResolver = resolve;
+        if (closed) settleJson(drainOnClose());
+      });
     },
     startDispatch(handler: (line: string) => void) {
       dispatch = handler;
+      // `run` mode never calls `readJsonValue`, so mode is still `'json'`
+      // here and incoming `permission_response` lines would otherwise be
+      // accumulated as JSON. Force the transition; flush any text the JSON
+      // buffer happened to capture as dispatch lines so nothing is dropped.
+      if (mode === 'json') {
+        mode = 'dispatch';
+        if (jsonBuffer) {
+          const lines = jsonBuffer.split('\n');
+          jsonBuffer = '';
+          for (const l of lines) handler(l);
+        }
+      }
+      while (dispatchQueue.length > 0) {
+        const next = dispatchQueue.shift();
+        if (next !== undefined) handler(next);
+      }
     },
     close() {
       closed = true;
@@ -242,17 +321,23 @@ export async function runCli(deps: RunCliDeps): Promise<number> {
 
   let resumeCommand: Command<ResumeInputType> | null = null;
   if (args.mode === 'resume') {
-    const line = await reader.readOneLine();
-    if (line === null || line.trim() === '') {
+    const read = await reader.readJsonValue();
+    if (read.kind === 'empty') {
       reader.close();
       deps.stderr.write(
         'bettervibes resume: expected ResumeInput JSON on stdin\n'
       );
       return 2;
     }
+    if (read.kind === 'error') {
+      reader.close();
+      deps.stderr.write(
+        `bettervibes resume: invalid ResumeInput JSON: ${read.error.message}\n`
+      );
+      return 2;
+    }
     try {
-      const parsed = JSON.parse(line);
-      const resume = ResumeInput.parse(parsed);
+      const resume = ResumeInput.parse(read.value);
       resumeCommand = new Command({ resume });
     } catch (e) {
       reader.close();
@@ -262,9 +347,25 @@ export async function runCli(deps: RunCliDeps): Promise<number> {
       return 2;
     }
 
+    // Refuse to invoke the graph when there's nothing to resume — without
+    // this, `stream(Command({resume}))` against an empty/terminated thread
+    // returns `done` with empty task_id/0 iterations, which is
+    // indistinguishable from a successful run that completed normally.
+    const pre = await compiled.getState(config);
+    const prePending = (pre?.tasks ?? []).flatMap((t) => t.interrupts ?? []);
+    if (prePending.length === 0) {
+      reader.close();
+      const event = CliOutput.parse({
+        status: 'no_active_task',
+        message:
+          'no in-progress task to resume; run `bettervibes run <task-id>` first',
+      });
+      writeJsonLine(deps.stdout, event);
+      return 2;
+    }
+
     // Seed lastKnownContext from the pre-resume checkpoint so the gate has
     // accurate task_id/iteration if a permission prompt fires immediately.
-    const pre = await compiled.getState(config);
     const preValues = (pre?.values ?? {}) as Partial<GraphStateType>;
     if (typeof preValues.task_id === 'string')
       lastKnownContext.task_id = preValues.task_id;
