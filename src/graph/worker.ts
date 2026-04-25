@@ -93,6 +93,7 @@ export async function execNode(
     taskContent: state.task_content!,
     taskId: state.task_id!,
     iteration: state.iteration!,
+    metadata: state.task_metadata,
   });
   const gate = config?.configurable?.permissionGate as
     | PermissionGate

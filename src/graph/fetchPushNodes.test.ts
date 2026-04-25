@@ -17,6 +17,7 @@ const baseState: GraphStateType = {
   accumulated_notes: [],
   task_id: 'smoke',
   task_content: null,
+  task_metadata: null,
   iteration: null,
   report_path: null,
   terminal_intent: null,
@@ -28,15 +29,30 @@ describe('fetchTaskNode', () => {
     jest.clearAllMocks();
   });
 
-  it('should read tasks/ingest/{task_id}.md and populate task_content', async () => {
+  it('should read tasks/ingest/{task_id}.md and populate task_content with empty metadata', async () => {
     mockReadFile.mockResolvedValue('# smoke task body');
 
     const result = await fetchTaskNode(baseState);
 
-    expect(result).toEqual({ task_content: '# smoke task body' });
+    expect(result).toEqual({
+      task_content: '# smoke task body',
+      task_metadata: {},
+    });
     expect(mockReadFile).toHaveBeenCalledTimes(1);
     const [calledPath] = mockReadFile.mock.calls[0];
     expect(calledPath).toMatch(/tasks[\\/]ingest[\\/]smoke\.md$/);
+  });
+
+  it('should expose parsed frontmatter on task_metadata and strip it from task_content', async () => {
+    mockReadFile.mockResolvedValue(
+      '---\nidempotency_check: true\n---\n# smoke task body'
+    );
+
+    const result = await fetchTaskNode(baseState);
+
+    expect(result.task_metadata).toEqual({ idempotency_check: true });
+    expect(result.task_content).toContain('# smoke task body');
+    expect(result.task_content).not.toContain('idempotency_check');
   });
 
   it('should throw when task_id is null', async () => {

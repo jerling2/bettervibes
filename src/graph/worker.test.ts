@@ -38,6 +38,7 @@ const baseState = {
   accumulated_notes: [],
   task_id: 'smoke',
   task_content: '# Task\n\nSteps here.',
+  task_metadata: null,
   iteration: 1,
   report_path: null,
   terminal_intent: null,

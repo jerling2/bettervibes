@@ -10,15 +10,49 @@ describe('readTaskFile', () => {
     jest.clearAllMocks();
   });
 
-  it('should return file contents when the task file exists', async () => {
+  it('should return body and empty metadata when the file has no frontmatter', async () => {
     mockReadFile.mockResolvedValue('# task body');
 
     const result = await readTaskFile('my-task');
 
-    expect(result).toBe('# task body');
+    expect(result).toEqual({ body: '# task body', metadata: {} });
     expect(mockReadFile).toHaveBeenCalledTimes(1);
     const [calledPath] = mockReadFile.mock.calls[0];
     expect(calledPath).toMatch(/tasks[\\/]ingest[\\/]my-task\.md$/);
+  });
+
+  it('should parse idempotency_check from frontmatter and strip it from the body', async () => {
+    mockReadFile.mockResolvedValue(
+      '---\nidempotency_check: true\n---\n# task body\n'
+    );
+
+    const result = await readTaskFile('my-task');
+
+    expect(result.metadata.idempotency_check).toBe(true);
+    expect(result.body).not.toContain('idempotency_check');
+    expect(result.body).toContain('# task body');
+  });
+
+  it('should preserve unknown frontmatter keys via passthrough', async () => {
+    mockReadFile.mockResolvedValue(
+      '---\ntask_id: hello\nfuture_field: 42\n---\n# body\n'
+    );
+
+    const result = await readTaskFile('my-task');
+
+    expect(result.metadata).toMatchObject({ task_id: 'hello', future_field: 42 });
+  });
+
+  it('should reject non-boolean idempotency_check', async () => {
+    mockReadFile.mockResolvedValue('---\nidempotency_check: "yes"\n---\nbody\n');
+
+    await expect(readTaskFile('my-task')).rejects.toThrow();
+  });
+
+  it('should throw on malformed YAML frontmatter', async () => {
+    mockReadFile.mockResolvedValue('---\nidempotency_check: true\n  bad: : :\n---\nbody\n');
+
+    await expect(readTaskFile('my-task')).rejects.toThrow();
   });
 
   it('should throw "Task not found" when fs raises ENOENT', async () => {

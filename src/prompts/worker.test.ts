@@ -1,5 +1,8 @@
 import { formatReportFilename } from '../tools/commitTask';
-import { buildWorkerPrompt } from './worker';
+import {
+  PREFLIGHT_IDEMPOTENCY_INSTRUCTION,
+  buildWorkerPrompt,
+} from './worker';
 
 describe('buildWorkerPrompt', () => {
   const base = {
@@ -7,6 +10,7 @@ describe('buildWorkerPrompt', () => {
     taskContent: '# Task\n\nSteps here.',
     taskId: 'add-auth',
     iteration: 1,
+    metadata: null,
   };
 
   it('should include the orchestrator instructions', () => {
@@ -25,7 +29,7 @@ describe('buildWorkerPrompt', () => {
   it('should embed the task_id in the report path', () => {
     const out = buildWorkerPrompt(base);
 
-    expect(out).toContain('packages/langgraph/src/tasks/staged/add-auth-01.md');
+    expect(out).toContain('tasks/staged/add-auth-01.md');
   });
 
   it('should zero-pad the iteration to two digits in the report path', () => {
@@ -47,5 +51,40 @@ describe('buildWorkerPrompt', () => {
     const expectedFilename = formatReportFilename(base.taskId, base.iteration);
 
     expect(out).toContain(expectedFilename);
+  });
+
+  it('should omit the pre-flight block when metadata is null', () => {
+    const out = buildWorkerPrompt(base);
+
+    expect(out).not.toContain(PREFLIGHT_IDEMPOTENCY_INSTRUCTION);
+    expect(out).not.toContain('Pre-flight: idempotency check');
+  });
+
+  it('should omit the pre-flight block when idempotency_check is missing', () => {
+    const out = buildWorkerPrompt({ ...base, metadata: {} });
+
+    expect(out).not.toContain(PREFLIGHT_IDEMPOTENCY_INSTRUCTION);
+  });
+
+  it('should omit the pre-flight block when idempotency_check is false', () => {
+    const out = buildWorkerPrompt({
+      ...base,
+      metadata: { idempotency_check: false },
+    });
+
+    expect(out).not.toContain(PREFLIGHT_IDEMPOTENCY_INSTRUCTION);
+  });
+
+  it('should prepend the pre-flight block when idempotency_check is true', () => {
+    const out = buildWorkerPrompt({
+      ...base,
+      metadata: { idempotency_check: true },
+    });
+
+    expect(out).toContain(PREFLIGHT_IDEMPOTENCY_INSTRUCTION);
+    expect(out.indexOf(PREFLIGHT_IDEMPOTENCY_INSTRUCTION)).toBe(0);
+    expect(out.indexOf('Do the thing carefully.')).toBeGreaterThan(
+      out.indexOf(PREFLIGHT_IDEMPOTENCY_INSTRUCTION)
+    );
   });
 });

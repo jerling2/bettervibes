@@ -15,6 +15,7 @@ const baseState: GraphStateType = {
   accumulated_notes: [],
   task_id: 'smoke',
   task_content: '# Task',
+  task_metadata: null,
   iteration: 1,
   report_path: '/abs/tasks/staged/smoke-01.md',
   terminal_intent: null,

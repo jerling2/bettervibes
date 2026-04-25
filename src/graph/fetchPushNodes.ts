@@ -24,8 +24,8 @@ export async function fetchTaskNode(
   if (state.task_id === null) {
     throw new Error('fetchTaskNode: state.task_id is null');
   }
-  const task_content = await readTaskFile(state.task_id);
-  return { task_content };
+  const { body, metadata } = await readTaskFile(state.task_id);
+  return { task_content: body, task_metadata: metadata };
 }
 
 /**

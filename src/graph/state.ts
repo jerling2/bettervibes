@@ -1,5 +1,6 @@
 import { Annotation, messagesStateReducer } from '@langchain/langgraph';
 import type { BaseMessage } from '@langchain/core/messages';
+import type { TaskMetadata } from '../tools/fetchTask';
 
 // ============================================================================
 // Types & Interfaces
@@ -48,6 +49,10 @@ export const GraphState = Annotation.Root({
     default: () => null,
   }),
   task_content: Annotation<string | null>({
+    reducer: (_, next) => next,
+    default: () => null,
+  }),
+  task_metadata: Annotation<TaskMetadata | null>({
     reducer: (_, next) => next,
     default: () => null,
   }),

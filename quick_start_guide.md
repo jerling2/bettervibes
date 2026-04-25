@@ -123,6 +123,42 @@ echo '{"decision":"redlight","feedback":"<specific reason>"}' | bettervibes resu
 
 After greenlight, the report moves from `tasks/staged/` to `tasks/done/`.
 
+### Pre-flight idempotency check (opt-in)
+
+Tasks generated from a regenerated upstream spec may describe work already
+done under a different ID in a prior run. Set `idempotency_check: true` in
+the task's frontmatter to ask the worker to probe the codebase first and,
+if the work is already in place, write a "No-op: already complete" report
+instead of redoing it. The report still flows through the normal
+`human_review` path — you greenlight it just like any other report, and it
+lands in `tasks/done/` as documentation that the task was considered.
+
+```markdown
+---
+task_id: add-auth
+idempotency_check: true
+---
+
+# Task: add-auth
+
+## Acceptance Criteria
+- `POST /login` returns a signed JWT on valid credentials.
+- Invalid credentials return 401 without leaking which field was wrong.
+
+## Touches
+- `src/auth/login.ts`
+- `src/auth/jwt.ts`
+
+## Spec Sections
+- §4.1 (auth)
+```
+
+The worker reads `## Acceptance Criteria` and `## Touches` sections by
+convention when present — neither is required, and the section names are
+not parsed mechanically. When in doubt, the worker proceeds with the task:
+a redundant pass surfaces in human review, but a false skip silently drops
+work.
+
 ---
 
 ## 4. Teach Claude Code about BetterVibes
