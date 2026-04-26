@@ -28,7 +28,7 @@ import { access, readdir, readFile, rename } from 'fs/promises';
 import { MemorySaver } from '@langchain/langgraph';
 import { buildBetterVibesGraph } from '../graph/graph';
 import { ORCHESTRATOR_MCP_SERVER_NAME } from '../graph/orchestrator';
-import { parseArgs, runCli } from './runner';
+import { parseArgs, runCli, THREAD_ID } from './runner';
 
 const mockReadFile = readFile as jest.MockedFunction<typeof readFile>;
 const mockAccess = access as jest.MockedFunction<typeof access>;
@@ -137,6 +137,7 @@ describe('parseArgs', () => {
     expect(parseArgs(['run', 'smoke'])).toEqual({
       mode: 'run',
       task_id: 'smoke',
+      include: [],
     });
   });
 
@@ -158,6 +159,42 @@ describe('parseArgs', () => {
 
   it('rejects extra arguments to `resume`', () => {
     expect(parseArgs(['resume', 'oops'])).toMatchObject({ mode: 'invalid' });
+  });
+
+  it('accepts `run <task-id> --include <single-path>`', () => {
+    expect(parseArgs(['run', 'smoke', '--include', 'src/foo.ts'])).toEqual({
+      mode: 'run',
+      task_id: 'smoke',
+      include: ['src/foo.ts'],
+    });
+  });
+
+  it('accepts `run <task-id> --include <p1> <p2> <p3>`', () => {
+    expect(
+      parseArgs(['run', 'smoke', '--include', 'a.ts', 'b.ts', 'c.ts'])
+    ).toEqual({
+      mode: 'run',
+      task_id: 'smoke',
+      include: ['a.ts', 'b.ts', 'c.ts'],
+    });
+  });
+
+  it('rejects `--include` with no following paths', () => {
+    expect(
+      parseArgs(['run', 'smoke', '--include'])
+    ).toMatchObject({ mode: 'invalid' });
+  });
+
+  it('rejects unknown flags after the task id', () => {
+    expect(
+      parseArgs(['run', 'smoke', '--frobnicate', 'x'])
+    ).toMatchObject({ mode: 'invalid' });
+  });
+
+  it('rejects `--include` on resume', () => {
+    expect(
+      parseArgs(['resume', '--include', 'x'])
+    ).toMatchObject({ mode: 'invalid' });
   });
 });
 
@@ -227,11 +264,12 @@ describe('runCli — run mode', () => {
   it('emits a done event when the orchestrator calls mark_done', async () => {
     mockQuery.mockImplementation(queryInvokingTool('mark_done', {}));
     const stdio = makeStdio();
+    const checkpointer = new MemorySaver();
     const exit = await runCli(
       makeDeps({
         argv: ['run', 'smoke'],
         stdio,
-        checkpointer: new MemorySaver(),
+        checkpointer,
       })
     );
     expect(exit).toBe(0);
@@ -239,6 +277,9 @@ describe('runCli — run mode', () => {
     expect(lines).toEqual([
       { status: 'done', task_id: 'smoke', iterations: 0 },
     ]);
+    // mark_done never goes through the human gate, so human_verdict stays
+    // null and the thread must NOT be cleared.
+    expect(checkpointer.storage[THREAD_ID]).toBeDefined();
   });
 
   it('emits a human_review interrupted event when the worker completes', async () => {
@@ -301,6 +342,87 @@ describe('runCli — run mode', () => {
         question: 'JWT or sessions?',
       },
     ]);
+  });
+
+  it('reads --include files and renders them in the orchestrator prompt', async () => {
+    // Two routes hit fs.readFile in this run: the task ingest file and each
+    // --include path. Distinguish by suffix so the per-call payloads are stable.
+    mockReadFile.mockImplementation((p) => {
+      const s = String(p);
+      if (s.endsWith('.bettervibes-include-a.ts'))
+        return Promise.resolve('export const A = 1;');
+      if (s.endsWith('.bettervibes-include-b.ts'))
+        return Promise.resolve('export const B = 2;');
+      return Promise.resolve('# Smoke task body');
+    });
+
+    let capturedPrompt: string | null = null;
+    mockQuery.mockImplementation((params: QueryParams) => {
+      capturedPrompt = params.prompt;
+      const server =
+        params.options.mcpServers?.[ORCHESTRATOR_MCP_SERVER_NAME];
+      if (!server) throw new Error('no orchestrator server');
+      const tool = server.tools.find((t) => t.name === 'mark_done');
+      if (!tool) throw new Error('no mark_done');
+      return (async function* () {
+        await tool.handler({}, {});
+      })();
+    });
+
+    const stdio = makeStdio();
+    const exit = await runCli(
+      makeDeps({
+        argv: [
+          'run',
+          'smoke',
+          '--include',
+          '.bettervibes-include-a.ts',
+          '.bettervibes-include-b.ts',
+        ],
+        stdio,
+        checkpointer: new MemorySaver(),
+      })
+    );
+
+    expect(exit).toBe(0);
+    expect(capturedPrompt).not.toBeNull();
+    const prompt = capturedPrompt as unknown as string;
+    expect(prompt).toContain('Included files:');
+    expect(prompt).toContain('.bettervibes-include-a.ts');
+    expect(prompt).toContain('export const A = 1;');
+    expect(prompt).toContain('.bettervibes-include-b.ts');
+    expect(prompt).toContain('export const B = 2;');
+    // Order preserved: a before b.
+    expect(prompt.indexOf('export const A = 1;')).toBeLessThan(
+      prompt.indexOf('export const B = 2;')
+    );
+  });
+
+  it('exits 1 with a clear error when --include references a missing file', async () => {
+    mockReadFile.mockImplementation((p) => {
+      const s = String(p);
+      if (s.endsWith('does-not-exist.ts')) {
+        const err: NodeJS.ErrnoException = Object.assign(
+          new Error('ENOENT'),
+          { code: 'ENOENT' }
+        );
+        return Promise.reject(err);
+      }
+      return Promise.resolve('# Smoke task body');
+    });
+
+    const stdio = makeStdio();
+    const exit = await runCli(
+      makeDeps({
+        argv: ['run', 'smoke', '--include', 'does-not-exist.ts'],
+        stdio,
+        checkpointer: new MemorySaver(),
+      })
+    );
+
+    expect(exit).toBe(1);
+    expect(stdio.getStderr()).toMatch(/Include file not found: does-not-exist\.ts/);
+    expect(stdio.getStdoutLines()).toEqual([]);
   });
 });
 
@@ -372,6 +494,20 @@ describe('runCli — resume mode', () => {
     expect(lines).toEqual([
       { status: 'done', task_id: 'smoke', iterations: 1 },
     ]);
+    // Greenlight + push success must wipe the thread so the next run starts
+    // fresh. MemorySaver internals: storage keyed by thread_id, writes keyed
+    // by JSON-encoded [thread_id, ns, checkpoint_id].
+    expect(checkpointer.storage[THREAD_ID]).toBeUndefined();
+    const remainingWriteThreads = Object.keys(checkpointer.writes).filter(
+      (k) => {
+        try {
+          return (JSON.parse(k) as unknown[])[0] === THREAD_ID;
+        } catch {
+          return false;
+        }
+      }
+    );
+    expect(remainingWriteThreads).toEqual([]);
   });
 
   it('redlights with feedback and loops back to the orchestrator', async () => {
@@ -398,6 +534,9 @@ describe('runCli — resume mode', () => {
     expect(lines).toEqual([
       { status: 'done', task_id: 'smoke', iterations: 1 },
     ]);
+    // Redlight then mark_done leaves human_verdict === 'redlight' at END,
+    // so the thread must NOT be cleared.
+    expect(checkpointer.storage[THREAD_ID]).toBeDefined();
   });
 
   it('accepts pretty-printed multi-line resume JSON', async () => {

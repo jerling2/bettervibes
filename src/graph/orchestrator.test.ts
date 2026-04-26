@@ -48,6 +48,7 @@ const baseState: GraphStateType = {
   report_path: null,
   terminal_intent: null,
   human_verdict: null,
+  included_files: [],
 };
 
 type SdkToolShape = {
@@ -254,5 +255,28 @@ describe('buildOrchestratorPrompt', () => {
     const prompt = buildOrchestratorPrompt(baseState);
 
     expect(prompt).toMatch(/no recent activity|first turn|none/i);
+  });
+
+  it('omits the included-files section when no files are included', () => {
+    const prompt = buildOrchestratorPrompt(baseState);
+    expect(prompt).not.toContain('Included files:');
+    expect(prompt).not.toContain('<file path=');
+  });
+
+  it('renders <file> blocks in argv order when included_files is non-empty', () => {
+    const prompt = buildOrchestratorPrompt({
+      ...baseState,
+      included_files: [
+        { path: '/abs/a.ts', content: 'export const A = 1;' },
+        { path: '/abs/b.ts', content: 'export const B = 2;' },
+      ],
+    });
+
+    expect(prompt).toContain('Included files:');
+    expect(prompt).toContain('<file path="/abs/a.ts">');
+    expect(prompt).toContain('export const A = 1;');
+    expect(prompt).toContain('<file path="/abs/b.ts">');
+    expect(prompt).toContain('export const B = 2;');
+    expect(prompt.indexOf('/abs/a.ts')).toBeLessThan(prompt.indexOf('/abs/b.ts'));
   });
 });

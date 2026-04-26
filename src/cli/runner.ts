@@ -2,10 +2,12 @@ import * as readline from 'node:readline';
 import { Command, isGraphInterrupt } from '@langchain/langgraph';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import type { RunnableConfig } from '@langchain/core/runnables';
+import { clearThread } from '../checkpointer';
 import { buildBetterVibesGraph } from '../graph/graph';
 import { PermissionGate } from '../graph/permissionGate';
 import { CLAUDE_CODE_DEFAULT_TOOLS } from '../graph/worker';
 import type { GraphStateType } from '../graph/state';
+import { readIncludeFiles } from '../tools/includeFiles';
 import {
   CliOutput,
   PermissionRequestEvent,
@@ -34,7 +36,7 @@ export interface RunCliDeps {
 }
 
 type ParsedArgs =
-  | { mode: 'run'; task_id: string }
+  | { mode: 'run'; task_id: string; include: string[] }
   | { mode: 'resume' }
   | { mode: 'invalid'; message: string };
 
@@ -56,20 +58,31 @@ export const THREAD_ID = 'bettervibes-main';
  * @param argv - Usually `process.argv.slice(2)`.
  *
  * @remarks
- * Rejects anything that isn't exactly `run <non-empty-id>` or `resume`. The
- * rejection message doubles as the usage string written to stderr.
+ * Accepts:
+ *   `run <task-id> [--include <path1> [<path2> ...]]`
+ *   `resume`
+ * `--include` is run-only and requires at least one path; remaining tokens
+ * after the flag are all treated as paths. The rejection message doubles as
+ * the usage string written to stderr.
  */
 export function parseArgs(argv: string[]): ParsedArgs {
-  if (argv.length === 2 && argv[0] === 'run' && argv[1].length > 0) {
-    return { mode: 'run', task_id: argv[1] };
+  const usage =
+    'Usage:\n  bettervibes run <task-id> [--include <path1> [<path2> ...]]\n  bettervibes resume < <resume-json>';
+  if (argv[0] === 'run' && argv.length >= 2 && argv[1].length > 0) {
+    const task_id = argv[1];
+    const rest = argv.slice(2);
+    if (rest.length === 0) {
+      return { mode: 'run', task_id, include: [] };
+    }
+    if (rest[0] === '--include' && rest.length >= 2) {
+      return { mode: 'run', task_id, include: rest.slice(1) };
+    }
+    return { mode: 'invalid', message: usage };
   }
   if (argv.length === 1 && argv[0] === 'resume') {
     return { mode: 'resume' };
   }
-  return {
-    mode: 'invalid',
-    message: 'Usage:\n  bettervibes run <task-id>\n  bettervibes resume < <resume-json>',
-  };
+  return { mode: 'invalid', message: usage };
 }
 
 /**
@@ -404,10 +417,19 @@ export async function runCli(deps: RunCliDeps): Promise<number> {
     }
   });
 
-  const input =
-    args.mode === 'run'
-      ? ({ task_id: args.task_id } as Partial<GraphStateType>)
-      : (resumeCommand as Command<ResumeInputType>);
+  let input: Partial<GraphStateType> | Command<ResumeInputType>;
+  if (args.mode === 'run') {
+    try {
+      const included_files = await readIncludeFiles(args.include);
+      input = { task_id: args.task_id, included_files };
+    } catch (e) {
+      reader.close();
+      deps.stderr.write(`${(e as Error).message}\n`);
+      return 1;
+    }
+  } else {
+    input = resumeCommand as Command<ResumeInputType>;
+  }
 
   try {
     const stream = await compiled.stream(input as never, {
@@ -479,6 +501,20 @@ async function emitFromCheckpoint(
   const taskId =
     values.task_id ?? (args.mode === 'run' ? args.task_id : '');
   const iterations = values.iteration ?? 0;
+
+  // Greenlight is the only path that ends with `human_verdict === 'greenlight'`
+  // at END (graph topology: human_review→greenlight→push_task→END). Clearing
+  // the thread bookends the success path so the next `bettervibes run` starts
+  // on a fresh checkpoint, preventing cross-task message accumulation.
+  if (values.human_verdict === 'greenlight') {
+    try {
+      await clearThread(deps.checkpointer, THREAD_ID);
+    } catch (e) {
+      deps.stderr.write(`${(e as Error).message}\n`);
+      return 1;
+    }
+  }
+
   try {
     const done = CliOutput.parse({
       status: 'done',

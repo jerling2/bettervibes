@@ -22,6 +22,7 @@ const baseState: GraphStateType = {
   report_path: null,
   terminal_intent: null,
   human_verdict: null,
+  included_files: [],
 };
 
 describe('fetchTaskNode', () => {

@@ -8,6 +8,7 @@ import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
 import { ORCHESTRATOR_SYSTEM_PROMPT } from '../prompts/orchestrator';
+import type { IncludedFile } from '../tools/includeFiles';
 import type { GraphStateType, TerminalIntent } from './state';
 
 // ============================================================================
@@ -67,6 +68,7 @@ export function buildOrchestratorPrompt(state: GraphStateType): string {
   const iteration = state.iteration ?? 'none yet';
   const reportPath = state.report_path ?? 'none';
   const activity = renderRecentActivity(state.messages);
+  const includedSection = renderIncludedFiles(state.included_files);
   return `Current task state:
 
 - Task ID: ${state.task_id ?? 'unset'}
@@ -77,12 +79,33 @@ Task content:
 ---
 ${state.task_content ?? '(no task content loaded)'}
 ---
-
+${includedSection}
 Recent activity:
 ${activity}
 
 Call exactly one terminal tool to decide the next action.
 `;
+}
+
+/**
+ * Renders the user-supplied `--include` files as a labeled block of
+ * `<file path="…">` elements, or an empty string when no files were
+ * included.
+ *
+ * @param files - The resolved `state.included_files` array.
+ *
+ * @remarks
+ * Returns `''` (not a placeholder line) when empty so the orchestrator's
+ * prompt has no inert "Included files: none" header to scan past. When
+ * non-empty, returns a leading-and-trailing-newline block so the surrounding
+ * template stays readable regardless of presence.
+ */
+function renderIncludedFiles(files: IncludedFile[]): string {
+  if (files.length === 0) return '';
+  const blocks = files
+    .map((f) => `<file path="${f.path}">\n${f.content}\n</file>`)
+    .join('\n\n');
+  return `\nIncluded files:\n${blocks}\n`;
 }
 
 /**

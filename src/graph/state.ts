@@ -1,6 +1,7 @@
 import { Annotation, messagesStateReducer } from '@langchain/langgraph';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { TaskMetadata } from '../tools/fetchTask';
+import type { IncludedFile } from '../tools/includeFiles';
 
 // ============================================================================
 // Types & Interfaces
@@ -71,6 +72,10 @@ export const GraphState = Annotation.Root({
   human_verdict: Annotation<'greenlight' | 'redlight' | null>({
     reducer: (_, next) => next,
     default: () => null,
+  }),
+  included_files: Annotation<IncludedFile[]>({
+    reducer: (_, next) => next,
+    default: () => [],
   }),
 });
 
