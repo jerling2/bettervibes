@@ -12,8 +12,8 @@ review at each iteration. It runs against your Claude Max subscription via
 the Agent SDK — no API billing.
 
 This guide walks through a fresh install and a first run inside a consumer
-project. See `docs/orchestration/orchestration.spec.v1.md` in the original
-ArchIT repo for architectural details.
+project. See [`docs/orchestration/orchestration.spec.v1.md`](./docs/orchestration/orchestration.spec.v1.md)
+for architectural details.
 
 ---
 
@@ -94,10 +94,23 @@ From the project root, run:
 bettervibes run hello
 ```
 
+To pass extra context to the orchestrator on a single run — for example, a
+spec the worker should follow — append `--include <path…>`:
+
+```bash
+bettervibes run add-auth --include docs/specs/auth.spec.v1.md
+```
+
+Paths resolve against the project cwd. ENOENT fails loud with
+`Include file not found: <path>` so a typo can't silently produce an
+incomplete prompt. The orchestrator sees each file rendered as a
+`<file path="…">…</file>` block.
+
 The CLI streams newline-delimited JSON on stdout. Two event tiers:
 
-- **Coarse events** — `human_review`, `clarify`, or `done`. These end the
-  current CLI invocation. The process exits; you resume separately.
+- **Coarse events** — `human_review`, `clarify`, `done`, or `no_active_task`.
+  These end the current CLI invocation. The process exits; you resume
+  separately.
 - **Fine events** — `permission_request` during the worker's run. Answer by
   writing a `permission_response` JSON line to stdin without exiting.
 
@@ -107,6 +120,11 @@ Happy-path wire events:
 {"kind":"permission_request","request_id":"…","tool":"Write","args":{…},"task_id":"hello","iteration":1}
 {"status":"interrupted","interrupt":"human_review","task_id":"hello","iteration":1,"report_path":"tasks/staged/hello-01.md"}
 ```
+
+If you run `bettervibes resume` with no pending interrupt — for example,
+after the previous task already greenlit — the CLI emits
+`{"status":"no_active_task","message":"…"}` and exits 2 instead of invoking
+the graph.
 
 Read the staged report. If it looks good, greenlight:
 
@@ -121,7 +139,15 @@ If it's off, redlight with feedback — the orchestrator will re-delegate:
 echo '{"decision":"redlight","feedback":"<specific reason>"}' | bettervibes resume
 ```
 
-After greenlight, the report moves from `tasks/staged/` to `tasks/done/`.
+After greenlight, the report is moved from `tasks/staged/` to `tasks/done/`
+and the orchestrator's checkpoint thread is cleared so the next
+`bettervibes run` starts on a fresh state. Don't move files between
+`staged/` and `done/` by hand — the next greenlight will fail with
+`push target exists` (see §6).
+
+**Exit codes:** `0` on a coarse interrupt or successful `done`; `1` on a
+runtime error; `2` on an argv or stdin protocol error, or on
+`no_active_task`.
 
 ### Pre-flight idempotency check (opt-in)
 
@@ -176,11 +202,14 @@ reports accumulate in `tasks/staged/` and, after greenlight, `tasks/done/`.
 When the user asks to "run a task" or "start the orchestrator":
 
 1. Confirm the task id and that `tasks/ingest/<task-id>.md` exists.
-2. Run `bettervibes run <task-id>`.
+2. Run `bettervibes run <task-id> [--include <path…>]` (only pass `--include`
+   when the user has named extra context files for this run).
 3. Relay coarse events to the user in natural language:
    - `human_review` → summarize the staged report and ask greenlight/redlight.
    - `clarify` → relay the orchestrator's question and wait for the answer.
    - `done` → confirm completion.
+   - `no_active_task` → tell the user there is nothing to resume; suggest
+     `bettervibes run <task-id>`.
 4. For `permission_request` events during the run, surface the tool + args
    to the user and relay their `allow` / `deny` / `allow_session` decision
    back on stdin.
@@ -189,8 +218,14 @@ When the user asks to "run a task" or "start the orchestrator":
    - Redlight:   `echo '{"decision":"redlight","feedback":"<text>"}' | bettervibes resume`
    - Clarify:    `echo '{"decision":"clarify","answer":"<text>"}' | bettervibes resume`
 
-State is persisted in `.bettervibes/checkpoint.sqlite`. To reset a stuck
-thread, delete `.bettervibes/`.
+After a `human_review` greenlight, BetterVibes itself moves the report from
+`tasks/staged/` to `tasks/done/` and clears its checkpoint. Do not move
+files between those folders by hand — a manual move will collide with the
+next greenlight as `push target exists`.
+
+State is persisted in `.bettervibes/checkpoint.sqlite` and is cleared
+automatically after each greenlight. Deleting `.bettervibes/` is only needed
+as an escape hatch for a stuck thread.
 ```
 
 ---
@@ -225,5 +260,5 @@ security add-generic-password -a "$USER" -s "CLAUDE_CODE_OAUTH_TOKEN" -w "<paste
 | `Task not found: …/tasks/ingest/<id>.md` | Typo in task-id or file not created. |
 | SDK authentication error | `CLAUDE_CODE_OAUTH_TOKEN` empty — see §5. |
 | Hangs after a `permission_request` | Worker is waiting for a `permission_response` on stdin; answer or deny. |
-| `push target exists: …/tasks/done/<id>-01.md` | Prior greenlight closed the same task-iteration. Move or delete the old `done/` entry before retrying. |
+| `push target exists: …/tasks/done/<id>-01.md` | Most often a stale `done/` entry from a manual `staged/` → `done/` move. With deterministic checkpoint clearing, an honest re-greenlight of the same iteration is unusual. Delete the stale `done/` entry before retrying. |
 | `bettervibes: command not found` | `npm link` wasn't run, or `~/.npm-global/bin` (or nvm's bin) isn't on `PATH`. |

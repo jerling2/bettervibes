@@ -33,3 +33,15 @@ Still internally inconsistent, flagged here instead of patched in the spec:
 - Two mentions of `@bettervibes/shared` (carried over from the original `@archit/shared`) reference a workspace package that doesn't exist. Harmless as forward-looking guidance, but confusing without context.
 
 End-to-end smoke was verified from `~/tmp/bettervibes-smoke/` — fresh scratch dir with a trivial hello-world task, clean `human_review` → greenlight → `done` with zero permission prompts.
+
+## 2026-04-27: Joseph
+
+Two features and one event have shipped on top of the v1 spec since the 2026-04-24 migration. Logging here so the next monthly merge folds them into the spec proper, and so today's docs refresh of `quick_start_guide.md` and `README.md` has a single source of truth to point at.
+
+- **`--include <path…>` flag on `bettervibes run` (§4.4 CLI Contract).** The synopsis in §4.4 reads `bettervibes run <task-id>`; the implementation now also accepts `--include <path1> [<path2> …]`. Paths resolve against the consumer project's cwd, ENOENT fails loud as `Include file not found: <path>`, and each resolved file is rendered into the orchestrator prompt as a `<file path="…">…</file>` block. Source: `src/cli/runner.ts:68-86` (parseArgs), `src/tools/includeFiles.ts`. Motivation: pass spec or design-doc context the orchestrator should see on a single run without polluting the task spec itself.
+
+- **Deterministic checkpoint clearing on greenlight (§1.2 decisions, §4.2 control flow).** §1.2 currently says "To start fresh, delete the checkpoint file." That's now an escape hatch only — the happy path self-cleans. After a `human_review` greenlight reaches END (graph path: `human_review → greenlight → push_task → END`), the runner calls `clearThread(checkpointer, THREAD_ID)` so the next `bettervibes run` begins on an empty thread instead of accumulating messages across tasks. Source: `src/cli/runner.ts:505-516`, `src/checkpointer.ts`. Implication for §6 troubleshooting wording: `push target exists` is now almost always a stale `done/` entry from a manual move, not a re-greenlight of the same iteration.
+
+- **`no_active_task` coarse event (§4.4 `CliOutput`).** §4.4 defines `CliOutput` as a discriminated union over three statuses (`interrupted` with two interrupt sub-shapes, and `done`). A fourth status, `no_active_task`, is now emitted when `bettervibes resume` runs against a thread with no pending interrupt — exits 2 with `{"status":"no_active_task","message":"…"}` on stdout instead of invoking the graph. Source: `src/cli/schemas.ts:91-94` (schema), `src/cli/runner.ts:368-378` (emission). Motivation: distinguish "nothing to resume" from a successful no-op `done`, which the previous behavior conflated.
+
+Not flagged here because they're already in the spec or already correct: the opt-in `idempotency_check` frontmatter (`src/prompts/worker.ts`), authentication setup, and §2 directory layout.
