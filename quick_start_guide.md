@@ -185,6 +185,46 @@ not parsed mechanically. When in doubt, the worker proceeds with the task:
 a redundant pass surfaces in human review, but a false skip silently drops
 work.
 
+### Verifying before greenlight
+
+The worker can write tests without running them, claim a suite passes
+without executing it, and invent passing acceptance criteria. A staged
+report is whatever the worker *said* happened — not necessarily what did.
+Verify on the human-review side before greenlighting, where you have
+hands on the keyboard. Telling the worker to run tests itself just trusts
+the worker to follow that instruction; the human-review checkpoint is
+the one place that cannot be deceived.
+
+Run verification if any of these signals appear in the staged report or
+the changed files:
+
+- new or modified test files (`*.test.ts`, `*.spec.ts`, `__tests__/`
+  additions)
+- new or modified dependencies in `package.json`
+- the report claims "tests pass", "all passing", or "verified"
+- a new package directory was created (e.g. a new workspace)
+
+Skip if none of those signals appear (docs-only, rules-only, config-only
+tasks).
+
+Inside each affected package:
+
+```bash
+npm install      # only if node_modules/ is missing
+npm test         # always, when verification is required
+```
+
+If the package uses a different runner (Vitest, Bun test), use whatever
+its own `test` script points at — don't invent commands.
+
+- **Pass** → proceed to greenlight; mention you verified the suite ran
+  clean.
+- **Fail, or `npm install` errors** → don't greenlight. Surface the
+  output, and either redlight with the failure as feedback or stop to
+  fix manually.
+- **No tests were actually written despite the report claiming coverage**
+  → redlight, naming the gap.
+
 ---
 
 ## 4. Teach Claude Code about BetterVibes
@@ -201,11 +241,21 @@ reports accumulate in `tasks/staged/` and, after greenlight, `tasks/done/`.
 
 When the user asks to "run a task" or "start the orchestrator":
 
-1. Confirm the task id and that `tasks/ingest/<task-id>.md` exists.
-2. Run `bettervibes run <task-id> [--include <path…>]` (only pass `--include`
-   when the user has named extra context files for this run).
+1. Confirm the task id and that `tasks/ingest/<task-id>.md` exists. Always
+   invoke `bettervibes` from the project root — `bettervibes run` and
+   `bettervibes resume` resolve `.bettervibes/checkpoint.sqlite` and
+   `tasks/` against cwd, so a subdir invocation creates a stub checkpoint
+   in the wrong place and `resume` returns `no_active_task`.
+2. Run `bettervibes run <task-id> [--include <path…>]` as a backgrounded
+   process — `human_review` can sit for minutes or hours, so don't block
+   the foreground. Only pass `--include` when the user has named extra
+   context files for this run.
 3. Relay coarse events to the user in natural language:
-   - `human_review` → summarize the staged report and ask greenlight/redlight.
+   - `human_review` → read the report at the emitted `report_path` first
+     (don't summarize from memory). If the staged work touches tests,
+     dependencies, or claims a suite passes, run that suite yourself
+     before greenlighting — workers can claim tests pass without running
+     them. Then summarize and ask greenlight/redlight.
    - `clarify` → relay the orchestrator's question and wait for the answer.
    - `done` → confirm completion.
    - `no_active_task` → tell the user there is nothing to resume; suggest
