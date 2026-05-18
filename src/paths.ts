@@ -8,6 +8,7 @@ import { PROJECT_MARKER } from './projectRoot';
 export interface Paths {
   root: string;
   bvDir: string;
+  bvVersion: string;
   tasksNew: string;
   tasksStage: string;
   tasksDone: string;
@@ -31,6 +32,7 @@ export function buildPaths(root: string): Paths {
   return {
     root,
     bvDir,
+    bvVersion: path.join(bvDir, '.bvversion'),
     tasksNew: path.join(bvDir, 'tasks', 'new'),
     tasksStage: path.join(bvDir, 'tasks', 'stage'),
     tasksDone: path.join(bvDir, 'tasks', 'done'),

@@ -1,7 +1,9 @@
-import { copyFile, mkdir, realpath } from 'fs/promises';
+import { copyFile, mkdir, realpath, writeFile } from 'fs/promises';
 import { resolveBundledFile } from '../bundled';
 import { findProjectRoot } from '../projectRoot';
 import { buildPaths } from '../paths';
+import { getManifest } from '../manifest';
+import { getBvVersion } from '../version';
 
 // ============================================================================
 // Types & Interfaces
@@ -40,14 +42,15 @@ export async function runInit(deps: RunInitDeps): Promise<number> {
 
   const paths = buildPaths(target);
 
-  await mkdir(paths.tasksNew, { recursive: true });
-  await mkdir(paths.tasksStage, { recursive: true });
-  await mkdir(paths.tasksDone, { recursive: true });
-  await mkdir(paths.reports, { recursive: true });
-  await mkdir(paths.scripts, { recursive: true });
+  for (const entry of getManifest(paths)) {
+    if (entry.kind === 'directory') {
+      await mkdir(entry.target, { recursive: true });
+    } else {
+      await copyFile(resolveBundledFile(entry.bundledSourceName), entry.target);
+    }
+  }
 
-  await copyFile(resolveBundledFile('BETTER_VIBES_TEMPLATE.md'), paths.betterVibesMd);
-  await copyFile(resolveBundledFile('inventory.ts'), paths.inventoryScript);
+  await writeFile(paths.bvVersion, `${getBvVersion()}\n`, 'utf8');
 
   deps.stdout.write(`initialized bettervibes at ${paths.bvDir}\n`);
   deps.stdout.write(`add to your .gitignore: bv_orchestration/checkpoint.sqlite\n`);

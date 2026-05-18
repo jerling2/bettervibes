@@ -7,6 +7,7 @@ import { buildBetterVibesGraph } from '../graph/graph';
 import { runCli } from './runner';
 import { runInit } from './init';
 import { runInventorySync } from './inventorySync';
+import { runUpdate } from './update';
 
 // ============================================================================
 // Helpers
@@ -70,6 +71,17 @@ async function main(): Promise<number> {
       cwd: process.cwd(),
       stdout: process.stdout,
       stderr: process.stderr,
+    });
+  }
+
+  if (subcommand === 'update') {
+    const dryRun = extracted.rest.includes('--dry-run');
+    return runUpdate({
+      projectRootArg: extracted.projectRootArg,
+      cwd: process.cwd(),
+      stdout: process.stdout,
+      stderr: process.stderr,
+      dryRun,
     });
   }
 
