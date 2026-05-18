@@ -1,0 +1,310 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Stage 1 — Either open / update the Release PR when there are pending
+  # changesets, OR detect that the current commit is the merge of a Release
+  # PR and signal that the rest of the pipeline should run.
+  #
+  # First pass (push of a merged feature PR carrying a changeset):
+  #   - `changeset version` bumps package.json and writes CHANGELOG.md on a
+  #     side branch.
+  #   - The Release PR is opened (or updated) with a server-signed commit via
+  #     the GitHub GraphQL createCommitOnBranch mutation, satisfying the
+  #     "require signed commits" rule without storing a private GPG/SSH key
+  #     in CI.
+  #   - The PR is auto-merged using the bot's bypass on the default-branch
+  #     ruleset. (Without the bypass the PR would block forever — the bot is
+  #     the author, and self-approval is disallowed.)
+  #
+  # Second pass (push of the Release PR's squash-merge to main):
+  #   - No pending changesets; package.json's version differs from any
+  #     existing tag; the `detect` step sets should-release=true and the
+  #     downstream jobs run.
+  # ---------------------------------------------------------------------------
+  version-or-detect:
+    name: Open release PR or detect release-ready commit
+    runs-on: ubuntu-22.04
+    outputs:
+      should-release: ${{ steps.detect.outputs.should-release }}
+      version: ${{ steps.detect.outputs.version }}
+    steps:
+      - name: Mint release-bot installation token
+        id: bot-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: 3752043
+          private-key: ${{ secrets.BETTERVIBES_RELEASE_BOT_KEY }}
+
+      - name: Checkout (with full history for tag lookup)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ steps.bot-token.outputs.token }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # ---------------------------------------------------------------------
+      # Apply pending changesets (bumps package.json + writes CHANGELOG.md +
+      # deletes consumed .changeset/*.md files), then signal whether the
+      # working tree actually changed.
+      # ---------------------------------------------------------------------
+      - name: Apply pending changesets
+        id: cs-version
+        run: |
+          set -euo pipefail
+          npx changeset version
+          if [[ -n "$(git status --porcelain)" ]]; then
+            version=$(node -p "require('./package.json').version")
+            echo "has-changes=true" >> "$GITHUB_OUTPUT"
+            echo "version=${version}" >> "$GITHUB_OUTPUT"
+            echo "Pending changesets bump version to ${version}."
+          else
+            echo "has-changes=false" >> "$GITHUB_OUTPUT"
+            echo "No pending changesets."
+          fi
+
+      # ---------------------------------------------------------------------
+      # Build the Release PR body from the CHANGELOG entry that `changeset
+      # version` just wrote, so contributors see the same prose in the PR
+      # that will ultimately ship as the GitHub Release body.
+      # ---------------------------------------------------------------------
+      - name: Build Release PR body
+        id: pr-body
+        if: steps.cs-version.outputs.has-changes == 'true'
+        env:
+          VERSION: ${{ steps.cs-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          changelog_entry=$(awk -v v="${VERSION}" '
+            /^## / {
+              if (in_section) exit
+              if ($2 == v) { in_section = 1; next }
+            }
+            in_section { print }
+          ' CHANGELOG.md)
+
+          {
+            echo "body<<PR_BODY_EOF"
+            echo "## Release v${VERSION}"
+            echo ""
+            echo "This PR will publish \`bettervibes@${VERSION}\`. Merging will trigger build, test, tag, and GitHub Release."
+            echo ""
+            echo "${changelog_entry}"
+            echo "PR_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------------------
+      # Open / update the Release PR using a server-signed commit. The
+      # `sign-commits: true` option drives peter-evans/create-pull-request to
+      # use the GraphQL createCommitOnBranch mutation — GitHub signs the
+      # commit server-side, satisfying "require signed commits" without the
+      # bot needing to hold a GPG or SSH key.
+      # ---------------------------------------------------------------------
+      - name: Open / update Release PR (signed commit)
+        id: pr
+        if: steps.cs-version.outputs.has-changes == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ steps.bot-token.outputs.token }}
+          sign-commits: true
+          branch: changeset-release/main
+          delete-branch: true
+          title: "Release: version packages"
+          commit-message: "release: version packages"
+          body: ${{ steps.pr-body.outputs.body }}
+
+      # ---------------------------------------------------------------------
+      # Auto-merge the Release PR with the bot's bypass privilege.
+      #
+      # The bot authored the PR, the ruleset requires 1 approving review,
+      # and self-approval is disallowed — so without the bypass this PR
+      # would block forever. The bot bypasses unconditionally
+      # (bypass_mode: always on the ruleset), squash-merging straight to
+      # main. The merge then re-triggers this workflow; the `detect` step
+      # below sees should-release=true and the actual release runs.
+      #
+      # Skipped when no pending changesets were present (i.e., the workflow
+      # ran on a release-ready commit and is about to release).
+      # ---------------------------------------------------------------------
+      - name: Auto-merge Release PR (bot bypass)
+        if: steps.pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.pull-request-number }}
+        run: |
+          set -euo pipefail
+          echo "Merging Release PR #${PR_NUMBER} via bot bypass."
+          gh pr merge "${PR_NUMBER}" \
+            --repo "${{ github.repository }}" \
+            --squash \
+            --delete-branch \
+            --admin
+
+      - name: Detect whether this commit needs releasing
+        id: detect
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="v${version}"
+
+          if [ "${version}" = "0.0.0" ]; then
+            echo "package.json still at 0.0.0; no release."
+            echo "should-release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git rev-parse "${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists; nothing to release."
+            echo "should-release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag ${tag} does not exist; releasing."
+            echo "should-release=true" >> "$GITHUB_OUTPUT"
+            echo "version=${version}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Stage 2 — Re-verify the release-worthy commit. Same checks CI runs on the
+  # PR, run again against the squash-merged commit. No artifact upload: the
+  # release is informational (source-tagged), and install is documented as
+  # `git clone && npm install && npm run build`.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build and test
+    needs: version-or-detect
+    if: needs.version-or-detect.outputs.should-release == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (tsc)
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
+
+  # ---------------------------------------------------------------------------
+  # Stage 3 — Tag the commit and publish a GitHub Release.
+  #
+  # The annotated tag is created via the GitHub API in two steps (create the
+  # tag object, then create the ref), so GitHub signs the tag server-side
+  # and the Releases UI shows the "Verified" badge. No private signing key
+  # needs to live in CI for this. The Release body is the entry for this
+  # version extracted from CHANGELOG.md.
+  # ---------------------------------------------------------------------------
+  publish-release:
+    name: Tag and publish GitHub Release
+    needs: [version-or-detect, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Mint release-bot installation token
+        id: bot-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: 3752043
+          private-key: ${{ secrets.BETTERVIBES_RELEASE_BOT_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Create annotated tag via GitHub API
+        env:
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
+          VERSION: ${{ needs.version-or-detect.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Step 1: create the annotated tag object.
+          tag_sha=$(gh api \
+            "repos/${{ github.repository }}/git/tags" \
+            -f tag="v${VERSION}" \
+            -f message="Release v${VERSION}" \
+            -f object="${SHA}" \
+            -f type=commit \
+            --jq .sha)
+
+          echo "Created tag object ${tag_sha} for v${VERSION}"
+
+          # Step 2: create the ref that points at the tag object.
+          gh api \
+            "repos/${{ github.repository }}/git/refs" \
+            -f ref="refs/tags/v${VERSION}" \
+            -f sha="${tag_sha}" >/dev/null
+
+          echo "Pushed ref refs/tags/v${VERSION}"
+
+      - name: Extract changelog entry for this version
+        id: changelog
+        env:
+          VERSION: ${{ needs.version-or-detect.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # CHANGELOG.md only exists once `changeset version` has run at
+          # least once. The initial release (or any release made without
+          # going through the changeset flow) won't have it; fall through
+          # to the fallback below instead of crashing on awk.
+          if [ -f CHANGELOG.md ]; then
+            awk -v v="${VERSION}" '
+              /^## / {
+                if (in_section) exit
+                if ($2 == v) { in_section = 1; next }
+              }
+              in_section { print }
+            ' CHANGELOG.md > release-notes.md
+          else
+            : > release-notes.md
+          fi
+
+          if [ ! -s release-notes.md ]; then
+            echo "No changelog entry found for v${VERSION}; using fallback note."
+            printf "Release v%s.\n\nNo changelog entry was extracted; see CHANGELOG.md.\n" \
+              "${VERSION}" > release-notes.md
+          fi
+
+          echo "--- release-notes.md ---"
+          cat release-notes.md
+          echo "--- end ---"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
+          VERSION: ${{ needs.version-or-detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --notes-file release-notes.md \
+            --verify-tag
