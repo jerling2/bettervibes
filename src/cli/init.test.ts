@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { runInit } from './init';
+import { getBvVersion } from '../version';
 
 // ============================================================================
 // Test Helpers
@@ -62,6 +63,9 @@ describe('runInit', () => {
 
       const inventory = readFileSync(join(bvDir, 'scripts', 'inventory.ts'), 'utf8');
       expect(inventory).toBe(readFileSync(BUNDLED_INVENTORY, 'utf8'));
+
+      const bvVersion = readFileSync(join(bvDir, '.bvversion'), 'utf8');
+      expect(bvVersion.trim()).toBe(getBvVersion());
 
       expect(stdio.getStdout()).toContain(`initialized bettervibes at ${bvDir}`);
     } finally {
