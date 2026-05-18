@@ -1,4 +1,3 @@
-import { formatReportFilename } from '../tools/commitTask';
 import {
   PREFLIGHT_IDEMPOTENCY_INSTRUCTION,
   buildWorkerPrompt,
@@ -7,9 +6,11 @@ import {
 describe('buildWorkerPrompt', () => {
   const base = {
     instructions: 'Do the thing carefully.',
-    taskContent: '# Task\n\nSteps here.',
-    taskId: 'add-auth',
+    taskContent: '# Task: add auth\n\nSteps here.',
+    taskId: 'T-01',
     iteration: 1,
+    reportPath:
+      'bv_orchestration/logs/worker-reports/WR-01-add-auth-2026-05-07.md',
     metadata: null,
   };
 
@@ -22,35 +23,34 @@ describe('buildWorkerPrompt', () => {
   it('should include the task content', () => {
     const out = buildWorkerPrompt(base);
 
-    expect(out).toContain('# Task');
+    expect(out).toContain('# Task: add auth');
     expect(out).toContain('Steps here.');
   });
 
-  it('should embed the task_id in the report path', () => {
+  it('should embed the supplied report path', () => {
     const out = buildWorkerPrompt(base);
 
-    expect(out).toContain('tasks/staged/add-auth-01.md');
+    expect(out).toContain(
+      'bv_orchestration/logs/worker-reports/WR-01-add-auth-2026-05-07.md'
+    );
   });
 
-  it('should zero-pad the iteration to two digits in the report path', () => {
-    expect(buildWorkerPrompt({ ...base, iteration: 1 })).toContain('add-auth-01.md');
-    expect(buildWorkerPrompt({ ...base, iteration: 9 })).toContain('add-auth-09.md');
-    expect(buildWorkerPrompt({ ...base, iteration: 12 })).toContain('add-auth-12.md');
+  it('should reference the WORKER_REPORT_TEMPLATE structure', () => {
+    const out = buildWorkerPrompt(base);
+
+    expect(out).toContain('Executive Summary');
+    expect(out).toContain('Implementation');
+    expect(out).toContain('Files Touched');
+    expect(out).toContain('Locked-in Decisions');
+    expect(out).toContain("Worker's Narrative");
   });
 
   it('should end with the trailing write-report directive', () => {
     const out = buildWorkerPrompt(base);
 
     expect(out).toMatch(
-      /write a factual report to[^\n]*add-auth-01\.md[^\n]*describing what you did/i
+      /write a factual report to[^\n]*WR-01-add-auth-2026-05-07\.md/
     );
-  });
-
-  it('should use the same filename format as commitTask.verifyReportFile', () => {
-    const out = buildWorkerPrompt(base);
-    const expectedFilename = formatReportFilename(base.taskId, base.iteration);
-
-    expect(out).toContain(expectedFilename);
   });
 
   it('should omit the pre-flight block when metadata is null', () => {

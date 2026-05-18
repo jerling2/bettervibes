@@ -10,4 +10,4 @@ setup, and a first run.
 
 ## Architecture
 
-Spec: [`docs/orchestration/orchestration.spec.v1.md`](./docs/orchestration/orchestration.spec.v1.md).
+PRD: [`docs/prds/PRD-orchestration-v1.md`](./docs/prds/PRD-orchestration-v1.md).

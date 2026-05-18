@@ -2,9 +2,13 @@ jest.mock('fs/promises');
 
 import path from 'node:path';
 import { readFile } from 'fs/promises';
-import { readIncludeFiles } from './includeFiles';
+import { makeIncludeFiles } from './includeFiles';
+import { buildPaths } from '../paths';
 
 const mockReadFile = readFile as jest.MockedFunction<typeof readFile>;
+
+const PATHS = buildPaths('/abs/proj');
+const readIncludeFiles = makeIncludeFiles(PATHS);
 
 describe('readIncludeFiles', () => {
   beforeEach(() => {
@@ -27,8 +31,20 @@ describe('readIncludeFiles', () => {
 
     const out = await readIncludeFiles(['a.ts', 'b.ts']);
 
-    expect(out.map((f) => f.content)).toEqual(['content of a', 'content of b']);
-    expect(out.every((f) => path.isAbsolute(f.path))).toBe(true);
+    expect(out.map((f: { content: string }) => f.content)).toEqual([
+      'content of a',
+      'content of b',
+    ]);
+    expect(out.every((f: { path: string }) => path.isAbsolute(f.path))).toBe(
+      true
+    );
+  });
+
+  it('resolves relative paths against paths.root', async () => {
+    mockReadFile.mockResolvedValue('x' as unknown as string);
+    await readIncludeFiles(['rel/foo.ts']);
+    const [calledPath] = mockReadFile.mock.calls[0];
+    expect(calledPath).toBe(path.join(PATHS.root, 'rel/foo.ts'));
   });
 
   it('throws "Include file not found" with the original path on ENOENT', async () => {

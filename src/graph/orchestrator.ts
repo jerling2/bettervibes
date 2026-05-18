@@ -73,7 +73,7 @@ export function buildOrchestratorPrompt(state: GraphStateType): string {
 
 - Task ID: ${state.task_id ?? 'unset'}
 - Iteration: ${iteration}
-- Latest staged report path: ${reportPath}
+- Latest worker report path: ${reportPath}
 
 Task content:
 ---

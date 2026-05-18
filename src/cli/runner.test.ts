@@ -24,20 +24,38 @@ jest.mock('@anthropic-ai/claude-agent-sdk', () => ({
 jest.mock('fs/promises');
 
 import { PassThrough } from 'node:stream';
-import { access, readdir, readFile, rename } from 'fs/promises';
+import {
+  access,
+  readdir,
+  readFile,
+  rename,
+  writeFile,
+} from 'fs/promises';
 import { MemorySaver } from '@langchain/langgraph';
 import { buildBetterVibesGraph } from '../graph/graph';
 import { ORCHESTRATOR_MCP_SERVER_NAME } from '../graph/orchestrator';
+import { buildPaths } from '../paths';
 import { parseArgs, runCli, THREAD_ID } from './runner';
 
 const mockReadFile = readFile as jest.MockedFunction<typeof readFile>;
 const mockAccess = access as jest.MockedFunction<typeof access>;
 const mockRename = rename as jest.MockedFunction<typeof rename>;
-const mockReaddir = readdir as jest.MockedFunction<typeof readdir>;
+const mockReaddir = readdir as unknown as jest.Mock;
+const mockWriteFile = writeFile as jest.MockedFunction<typeof writeFile>;
+
+const PATHS = buildPaths('/abs/proj');
+const TASK_FILE = 'T-01-2026-05-07.md';
+const TASK_ID = 'T-01';
+const TASK_BODY =
+  '---\nstatus: new\nworker-reports: []\n---\n# Task: smoke\n\nbody';
+const STAGED_TASK_BODY =
+  '---\nstatus: stage\nworker-reports: []\n---\n# Task: smoke\n\nbody';
 
 // ============================================================================
 // Test Helpers
 // ============================================================================
+
+const ENOENT = Object.assign(new Error('enoent'), { code: 'ENOENT' });
 
 type SdkToolShape = {
   name: string;
@@ -58,7 +76,6 @@ type QueryParams = {
   };
 };
 
-/** Returns a query() mock that invokes one orchestrator terminal tool once. */
 function queryInvokingTool(
   toolName: string,
   args: Record<string, unknown>
@@ -74,7 +91,30 @@ function queryInvokingTool(
   };
 }
 
-/** Builds a fresh PassThrough-stdin/stdout/stderr triple + sink arrays. */
+function setupFs() {
+  mockReaddir.mockImplementation((p) => {
+    const s = String(p);
+    if (s.includes('tasks/new')) return Promise.resolve([TASK_FILE]);
+    if (s.includes('tasks/stage')) return Promise.resolve([TASK_FILE]);
+    if (s.includes('tasks/done')) return Promise.resolve([]);
+    return Promise.resolve([]);
+  });
+  mockReadFile.mockImplementation((p) => {
+    const s = String(p);
+    if (s.includes('tasks/stage')) return Promise.resolve(STAGED_TASK_BODY);
+    return Promise.resolve(TASK_BODY);
+  });
+  mockWriteFile.mockResolvedValue(undefined as unknown as void);
+  mockRename.mockResolvedValue(undefined as unknown as void);
+  mockAccess.mockImplementation((p) => {
+    const s = String(p);
+    // Done targets must appear absent for assertTargetFree
+    if (s.includes('tasks/done')) return Promise.reject(ENOENT);
+    // Anything else (include files, reports) succeeds by default
+    return Promise.resolve();
+  });
+}
+
 function makeStdio() {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
@@ -96,7 +136,6 @@ function makeStdio() {
   };
 }
 
-/** Minimal deps builder — one MemorySaver shared across a test's runCli calls. */
 function makeDeps(opts: {
   argv: string[];
   stdio: ReturnType<typeof makeStdio>;
@@ -107,12 +146,12 @@ function makeDeps(opts: {
     stdin: opts.stdio.stdin,
     stdout: opts.stdio.stdout,
     stderr: opts.stdio.stderr,
-    buildGraph: () => buildBetterVibesGraph(),
+    buildGraph: () => buildBetterVibesGraph(PATHS),
     checkpointer: opts.checkpointer,
+    paths: PATHS,
   };
 }
 
-/** Polls until the given predicate returns true or the timeout elapses. */
 async function waitFor<T>(
   fn: () => T | null | undefined,
   timeoutMs = 1000
@@ -133,10 +172,10 @@ async function waitFor<T>(
 // ============================================================================
 
 describe('parseArgs', () => {
-  it('accepts `run <task-id>`', () => {
-    expect(parseArgs(['run', 'smoke'])).toEqual({
+  it('accepts `run <T-NN>`', () => {
+    expect(parseArgs(['run', 'T-01'])).toEqual({
       mode: 'run',
-      task_id: 'smoke',
+      task_id: 'T-01',
       include: [],
     });
   });
@@ -161,33 +200,33 @@ describe('parseArgs', () => {
     expect(parseArgs(['resume', 'oops'])).toMatchObject({ mode: 'invalid' });
   });
 
-  it('accepts `run <task-id> --include <single-path>`', () => {
-    expect(parseArgs(['run', 'smoke', '--include', 'src/foo.ts'])).toEqual({
+  it('accepts `run <T-NN> --include <single-path>`', () => {
+    expect(parseArgs(['run', 'T-01', '--include', 'src/foo.ts'])).toEqual({
       mode: 'run',
-      task_id: 'smoke',
+      task_id: 'T-01',
       include: ['src/foo.ts'],
     });
   });
 
-  it('accepts `run <task-id> --include <p1> <p2> <p3>`', () => {
+  it('accepts `run <T-NN> --include <p1> <p2> <p3>`', () => {
     expect(
-      parseArgs(['run', 'smoke', '--include', 'a.ts', 'b.ts', 'c.ts'])
+      parseArgs(['run', 'T-01', '--include', 'a.ts', 'b.ts', 'c.ts'])
     ).toEqual({
       mode: 'run',
-      task_id: 'smoke',
+      task_id: 'T-01',
       include: ['a.ts', 'b.ts', 'c.ts'],
     });
   });
 
   it('rejects `--include` with no following paths', () => {
     expect(
-      parseArgs(['run', 'smoke', '--include'])
+      parseArgs(['run', 'T-01', '--include'])
     ).toMatchObject({ mode: 'invalid' });
   });
 
   it('rejects unknown flags after the task id', () => {
     expect(
-      parseArgs(['run', 'smoke', '--frobnicate', 'x'])
+      parseArgs(['run', 'T-01', '--frobnicate', 'x'])
     ).toMatchObject({ mode: 'invalid' });
   });
 
@@ -258,7 +297,7 @@ describe('runCli — protocol errors', () => {
 describe('runCli — run mode', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockReadFile.mockResolvedValue('# Smoke task body');
+    setupFs();
   });
 
   it('emits a done event when the orchestrator calls mark_done', async () => {
@@ -267,7 +306,7 @@ describe('runCli — run mode', () => {
     const checkpointer = new MemorySaver();
     const exit = await runCli(
       makeDeps({
-        argv: ['run', 'smoke'],
+        argv: ['run', TASK_ID],
         stdio,
         checkpointer,
       })
@@ -275,10 +314,8 @@ describe('runCli — run mode', () => {
     expect(exit).toBe(0);
     const lines = stdio.getStdoutLines().map((l) => JSON.parse(l));
     expect(lines).toEqual([
-      { status: 'done', task_id: 'smoke', iterations: 0 },
+      { status: 'done', task_id: TASK_ID, iterations: 0 },
     ]);
-    // mark_done never goes through the human gate, so human_verdict stays
-    // null and the thread must NOT be cleared.
     expect(checkpointer.storage[THREAD_ID]).toBeDefined();
   });
 
@@ -294,12 +331,11 @@ describe('runCli — run mode', () => {
           // Worker SDK drains silently — commitNode picks up the "written" file.
         })()
       );
-    mockAccess.mockResolvedValue(undefined as unknown as void);
 
     const stdio = makeStdio();
     const exit = await runCli(
       makeDeps({
-        argv: ['run', 'smoke'],
+        argv: ['run', TASK_ID],
         stdio,
         checkpointer: new MemorySaver(),
       })
@@ -311,9 +347,9 @@ describe('runCli — run mode', () => {
       {
         status: 'interrupted',
         interrupt: 'human_review',
-        task_id: 'smoke',
+        task_id: TASK_ID,
         iteration: 1,
-        report_path: expect.stringMatching(/smoke-01\.md$/),
+        report_path: expect.stringMatching(/WR-01-smoke-\d{4}-\d{2}-\d{2}\.md$/),
       },
     ]);
   });
@@ -327,7 +363,7 @@ describe('runCli — run mode', () => {
     const stdio = makeStdio();
     const exit = await runCli(
       makeDeps({
-        argv: ['run', 'smoke'],
+        argv: ['run', TASK_ID],
         stdio,
         checkpointer: new MemorySaver(),
       })
@@ -338,22 +374,21 @@ describe('runCli — run mode', () => {
       {
         status: 'interrupted',
         interrupt: 'clarify',
-        task_id: 'smoke',
+        task_id: TASK_ID,
         question: 'JWT or sessions?',
       },
     ]);
   });
 
   it('reads --include files and renders them in the orchestrator prompt', async () => {
-    // Two routes hit fs.readFile in this run: the task ingest file and each
-    // --include path. Distinguish by suffix so the per-call payloads are stable.
     mockReadFile.mockImplementation((p) => {
       const s = String(p);
-      if (s.endsWith('.bettervibes-include-a.ts'))
+      if (s.endsWith('include-a.ts'))
         return Promise.resolve('export const A = 1;');
-      if (s.endsWith('.bettervibes-include-b.ts'))
+      if (s.endsWith('include-b.ts'))
         return Promise.resolve('export const B = 2;');
-      return Promise.resolve('# Smoke task body');
+      if (s.includes('tasks/stage')) return Promise.resolve(STAGED_TASK_BODY);
+      return Promise.resolve(TASK_BODY);
     });
 
     let capturedPrompt: string | null = null;
@@ -374,10 +409,10 @@ describe('runCli — run mode', () => {
       makeDeps({
         argv: [
           'run',
-          'smoke',
+          TASK_ID,
           '--include',
-          '.bettervibes-include-a.ts',
-          '.bettervibes-include-b.ts',
+          'include-a.ts',
+          'include-b.ts',
         ],
         stdio,
         checkpointer: new MemorySaver(),
@@ -388,11 +423,10 @@ describe('runCli — run mode', () => {
     expect(capturedPrompt).not.toBeNull();
     const prompt = capturedPrompt as unknown as string;
     expect(prompt).toContain('Included files:');
-    expect(prompt).toContain('.bettervibes-include-a.ts');
+    expect(prompt).toContain('include-a.ts');
     expect(prompt).toContain('export const A = 1;');
-    expect(prompt).toContain('.bettervibes-include-b.ts');
+    expect(prompt).toContain('include-b.ts');
     expect(prompt).toContain('export const B = 2;');
-    // Order preserved: a before b.
     expect(prompt.indexOf('export const A = 1;')).toBeLessThan(
       prompt.indexOf('export const B = 2;')
     );
@@ -408,13 +442,14 @@ describe('runCli — run mode', () => {
         );
         return Promise.reject(err);
       }
-      return Promise.resolve('# Smoke task body');
+      if (s.includes('tasks/stage')) return Promise.resolve(STAGED_TASK_BODY);
+      return Promise.resolve(TASK_BODY);
     });
 
     const stdio = makeStdio();
     const exit = await runCli(
       makeDeps({
-        argv: ['run', 'smoke', '--include', 'does-not-exist.ts'],
+        argv: ['run', TASK_ID, '--include', 'does-not-exist.ts'],
         stdio,
         checkpointer: new MemorySaver(),
       })
@@ -433,11 +468,10 @@ describe('runCli — run mode', () => {
 describe('runCli — resume mode', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockReadFile.mockResolvedValue('# Smoke task body');
+    setupFs();
   });
 
   async function primeToHumanReview(checkpointer: MemorySaver) {
-    // Run the graph once until it pauses at HUMAN_INT.
     mockQuery
       .mockImplementationOnce(
         queryInvokingTool('delegate_to_worker', { instructions: 'do it' })
@@ -447,39 +481,19 @@ describe('runCli — resume mode', () => {
           // worker drain
         })()
       );
-    mockAccess.mockResolvedValue(undefined as unknown as void);
     const stdio = makeStdio();
     const exit = await runCli(
-      makeDeps({ argv: ['run', 'smoke'], stdio, checkpointer })
+      makeDeps({ argv: ['run', TASK_ID], stdio, checkpointer })
     );
     expect(exit).toBe(0);
   }
 
-  it('greenlights the report, moves staged → done, and emits a done event', async () => {
+  it('greenlights the report, moves the task spec stage → done, and emits a done event', async () => {
     const checkpointer = new MemorySaver();
     await primeToHumanReview(checkpointer);
 
-    // pushReports reads the staged dir and moves the single smoke report.
-    // Target in tasks/done/ must appear absent (ENOENT) for assertTargetFree.
-    mockReaddir.mockResolvedValue([
-      'smoke-01.md',
-    ] as unknown as Awaited<ReturnType<typeof readdir>>);
-    mockAccess.mockImplementation((p) => {
-      const s = String(p);
-      if (s.includes(`${'done'}/`) || s.endsWith(`/done/smoke-01.md`)) {
-        const err: NodeJS.ErrnoException = Object.assign(
-          new Error('ENOENT'),
-          { code: 'ENOENT' }
-        );
-        return Promise.reject(err);
-      }
-      return Promise.resolve();
-    });
-    mockRename.mockResolvedValue(undefined as unknown as void);
     mockQuery.mockReset();
 
-    // The resume stream won't re-enter the orchestrator on greenlight — the
-    // graph goes straight to pushTask and ends.
     const stdio = makeStdio();
     stdio.stdin.write('{"decision":"greenlight"}\n');
     stdio.stdin.end();
@@ -489,14 +503,17 @@ describe('runCli — resume mode', () => {
     );
 
     expect(exit).toBe(0);
-    expect(mockRename).toHaveBeenCalled();
+    // pushTaskNode should rename stage→done at least once.
+    const renameCalls = mockRename.mock.calls.filter(([from, to]) => {
+      const f = String(from);
+      const t = String(to);
+      return f.includes('tasks/stage') && t.includes('tasks/done');
+    });
+    expect(renameCalls.length).toBeGreaterThan(0);
     const lines = stdio.getStdoutLines().map((l) => JSON.parse(l));
     expect(lines).toEqual([
-      { status: 'done', task_id: 'smoke', iterations: 1 },
+      { status: 'done', task_id: TASK_ID, iterations: 1 },
     ]);
-    // Greenlight + push success must wipe the thread so the next run starts
-    // fresh. MemorySaver internals: storage keyed by thread_id, writes keyed
-    // by JSON-encoded [thread_id, ns, checkpoint_id].
     expect(checkpointer.storage[THREAD_ID]).toBeUndefined();
     const remainingWriteThreads = Object.keys(checkpointer.writes).filter(
       (k) => {
@@ -514,8 +531,6 @@ describe('runCli — resume mode', () => {
     const checkpointer = new MemorySaver();
     await primeToHumanReview(checkpointer);
 
-    // On resume, the orchestrator re-enters and in this test picks `mark_done`
-    // to keep the test path short while still proving the re-entry happened.
     mockQuery.mockReset();
     mockQuery.mockImplementation(queryInvokingTool('mark_done', {}));
 
@@ -529,13 +544,11 @@ describe('runCli — resume mode', () => {
       makeDeps({ argv: ['resume'], stdio, checkpointer })
     );
     expect(exit).toBe(0);
-    expect(mockQuery).toHaveBeenCalledTimes(1); // re-entered the orchestrator once
+    expect(mockQuery).toHaveBeenCalledTimes(1);
     const lines = stdio.getStdoutLines().map((l) => JSON.parse(l));
     expect(lines).toEqual([
-      { status: 'done', task_id: 'smoke', iterations: 1 },
+      { status: 'done', task_id: TASK_ID, iterations: 1 },
     ]);
-    // Redlight then mark_done leaves human_verdict === 'redlight' at END,
-    // so the thread must NOT be cleared.
     expect(checkpointer.storage[THREAD_ID]).toBeDefined();
   });
 
@@ -546,8 +559,6 @@ describe('runCli — resume mode', () => {
     mockQuery.mockReset();
     mockQuery.mockImplementation(queryInvokingTool('mark_done', {}));
 
-    // Same payload as the redlight test, but spread across multiple lines —
-    // exactly the shape a human pipes from a heredoc or `cat feedback.json`.
     const prettyJson = JSON.stringify(
       { decision: 'redlight', feedback: 'missing acceptance criteria' },
       null,
@@ -566,15 +577,11 @@ describe('runCli — resume mode', () => {
     expect(mockQuery).toHaveBeenCalledTimes(1);
     const lines = stdio.getStdoutLines().map((l) => JSON.parse(l));
     expect(lines).toEqual([
-      { status: 'done', task_id: 'smoke', iterations: 1 },
+      { status: 'done', task_id: TASK_ID, iterations: 1 },
     ]);
   });
 
   it('emits no_active_task and exits 2 when the checkpoint has nothing to resume', async () => {
-    // Fresh checkpointer — no `bettervibes run` has happened, so there is no
-    // pending interrupt for `resume` to act on. The bug we are guarding
-    // against: previously the runner would invoke the graph anyway and emit
-    // `{status:"done", task_id:"", iterations:0}`, which looked like success.
     const checkpointer = new MemorySaver();
 
     const stdio = makeStdio();
@@ -603,15 +610,13 @@ describe('runCli — resume mode', () => {
 describe('runCli — permission bridge', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockReadFile.mockResolvedValue('# Smoke task body');
-    mockAccess.mockResolvedValue(undefined as unknown as void);
+    setupFs();
   });
 
   async function workerCanUseToolScenario(opts: {
     toolToRequest: string;
     humanDecision: 'allow' | 'deny' | 'allow_session';
   }) {
-    // delegate → worker runs, asks for a non-allowlisted tool → await response.
     let capturedResult: unknown = null;
     mockQuery
       .mockImplementationOnce(
@@ -632,10 +637,9 @@ describe('runCli — permission bridge', () => {
     const checkpointer = new MemorySaver();
 
     const invokeP = runCli(
-      makeDeps({ argv: ['run', 'smoke'], stdio, checkpointer })
+      makeDeps({ argv: ['run', TASK_ID], stdio, checkpointer })
     );
 
-    // Wait for the permission_request line.
     const request = await waitFor(() => {
       const lines = stdio.getStdoutLines();
       const reqLine = lines.find((l) => l.includes('permission_request'));
@@ -646,7 +650,6 @@ describe('runCli — permission bridge', () => {
     expect(request.tool).toBe(opts.toolToRequest);
     expect(typeof request.request_id).toBe('string');
 
-    // Answer.
     stdio.stdin.write(
       JSON.stringify({
         kind: 'permission_response',
@@ -686,7 +689,7 @@ describe('runCli — permission bridge', () => {
 describe('runCli — error paths', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockReadFile.mockResolvedValue('# Smoke task body');
+    setupFs();
   });
 
   it('surfaces a non-interrupt SDK error on stderr with exit 1', async () => {
@@ -698,7 +701,7 @@ describe('runCli — error paths', () => {
     const stdio = makeStdio();
     const exit = await runCli(
       makeDeps({
-        argv: ['run', 'smoke'],
+        argv: ['run', TASK_ID],
         stdio,
         checkpointer: new MemorySaver(),
       })

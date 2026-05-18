@@ -1,51 +1,57 @@
-import { readTaskFile } from '../tools/fetchTask';
-import { pushReports } from '../tools/pushTask';
+import path from 'node:path';
+import { rename, writeFile } from 'fs/promises';
+import matter from 'gray-matter';
+import { makeFetchTask } from '../tools/fetchTask';
+import { makePushTask } from '../tools/pushTask';
 import type { GraphStateType } from './state';
+import type { Paths } from '../paths';
 
 // ============================================================================
-// Nodes
+// Node factories
 // ============================================================================
 
 /**
- * Loads the task markdown from `tasks/ingest/` into graph state.
+ * Builds `fetchTaskNode` and `pushTaskNode` bound to the resolved Paths.
  *
- * @param state - Graph state. `task_id` must be set by the caller (the CLI
- *   seeds it at graph invocation).
+ * `fetchTaskNode` reads the task spec from `tasksNew/`, populates
+ * `task_content` and `task_metadata`, then moves the spec into `tasksStage/`
+ * and flips its frontmatter `status` field to `stage`.
  *
- * @remarks
- * Deterministic side-effect node. The orchestrator has no fetch tool in v1;
- * the graph loads the task up-front so every orchestrator turn sees a
- * populated `task_content` in its prompt. ENOENT / invalid-task-id errors
- * propagate per the fail-loud policy (§1.2).
+ * `pushTaskNode` moves the task spec from `tasksStage/` to `tasksDone/` and
+ * flips its `status` to `done`.
  */
-export async function fetchTaskNode(
-  state: GraphStateType
-): Promise<Partial<GraphStateType>> {
-  if (state.task_id === null) {
-    throw new Error('fetchTaskNode: state.task_id is null');
-  }
-  const { body, metadata } = await readTaskFile(state.task_id);
-  return { task_content: body, task_metadata: metadata };
-}
+export function makeFetchPushNodes(paths: Paths) {
+  const readTaskFile = makeFetchTask(paths);
+  const pushTaskSpec = makePushTask(paths);
 
-/**
- * Promotes all staged iterations of the current task from `tasks/staged/` to
- * `tasks/done/`.
- *
- * @param state - Graph state. `task_id` must be set.
- *
- * @remarks
- * Runs on the greenlight branch after `HUMAN_INT`. Returns an empty state
- * update — the done/ paths are not persisted in state (the report_path field
- * holds the last staged path, which is still a valid historical reference).
- * Errors propagate per §1.2; no rollback on partial failure.
- */
-export async function pushTaskNode(
-  state: GraphStateType
-): Promise<Partial<GraphStateType>> {
-  if (state.task_id === null) {
-    throw new Error('pushTaskNode: state.task_id is null');
+  async function fetchTaskNode(
+    state: GraphStateType
+  ): Promise<Partial<GraphStateType>> {
+    if (state.task_id === null) {
+      throw new Error('fetchTaskNode: state.task_id is null');
+    }
+    const { body, metadata, filename } = await readTaskFile(state.task_id);
+
+    const stagePath = path.join(paths.tasksStage, filename);
+    const newPath = path.join(paths.tasksNew, filename);
+
+    const updatedMetadata = { ...metadata, status: 'stage' };
+    const stagedContent = matter.stringify(body, updatedMetadata);
+    await writeFile(newPath, stagedContent, 'utf8');
+    await rename(newPath, stagePath);
+
+    return { task_content: body, task_metadata: metadata };
   }
-  await pushReports(state.task_id);
-  return {};
+
+  async function pushTaskNode(
+    state: GraphStateType
+  ): Promise<Partial<GraphStateType>> {
+    if (state.task_id === null) {
+      throw new Error('pushTaskNode: state.task_id is null');
+    }
+    await pushTaskSpec(state.task_id);
+    return {};
+  }
+
+  return { fetchTaskNode, pushTaskNode };
 }

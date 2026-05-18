@@ -7,7 +7,8 @@ import { buildBetterVibesGraph } from '../graph/graph';
 import { PermissionGate } from '../graph/permissionGate';
 import { CLAUDE_CODE_DEFAULT_TOOLS } from '../graph/worker';
 import type { GraphStateType } from '../graph/state';
-import { readIncludeFiles } from '../tools/includeFiles';
+import { makeIncludeFiles } from '../tools/includeFiles';
+import type { Paths } from '../paths';
 import {
   CliOutput,
   PermissionRequestEvent,
@@ -21,11 +22,6 @@ import {
 // Types & Interfaces
 // ============================================================================
 
-/**
- * Dependency bundle injected into `runCli`. The production entry
- * (`cli/bettervibes.ts`) binds `process.{argv,stdin,stdout,stderr}` + a
- * `SqliteSaver`; unit tests bind `PassThrough` streams + a `MemorySaver`.
- */
 export interface RunCliDeps {
   argv: string[];
   stdin: NodeJS.ReadableStream;
@@ -33,6 +29,7 @@ export interface RunCliDeps {
   stderr: NodeJS.WritableStream;
   buildGraph: () => ReturnType<typeof buildBetterVibesGraph>;
   checkpointer: BaseCheckpointSaver;
+  paths: Paths;
 }
 
 type ParsedArgs =
@@ -44,30 +41,11 @@ type ParsedArgs =
 // Helpers
 // ============================================================================
 
-/**
- * Fixed thread id for the orchestrator checkpointer. Spec §1.2 — a single
- * thread keeps baseline messages and accumulated notes (v2) tied to one
- * conversation across runs.
- */
 export const THREAD_ID = 'bettervibes-main';
 
-/**
- * Parses CLI arguments (argv slice after `node bettervibes.ts` is stripped) into a
- * discriminated mode descriptor.
- *
- * @param argv - Usually `process.argv.slice(2)`.
- *
- * @remarks
- * Accepts:
- *   `run <task-id> [--include <path1> [<path2> ...]]`
- *   `resume`
- * `--include` is run-only and requires at least one path; remaining tokens
- * after the flag are all treated as paths. The rejection message doubles as
- * the usage string written to stderr.
- */
 export function parseArgs(argv: string[]): ParsedArgs {
   const usage =
-    'Usage:\n  bettervibes run <task-id> [--include <path1> [<path2> ...]]\n  bettervibes resume < <resume-json>';
+    'Usage:\n  bettervibes init [--project-root <path>]\n  bettervibes inventory-sync [--project-root <path>]\n  bettervibes run <T-NN> [--include <path1> [<path2> ...]] [--project-root <path>]\n  bettervibes resume [--project-root <path>]';
   if (argv[0] === 'run' && argv.length >= 2 && argv[1].length > 0) {
     const task_id = argv[1];
     const rest = argv.slice(2);
@@ -85,25 +63,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
   return { mode: 'invalid', message: usage };
 }
 
-/**
- * Writes a JSON-serialized record to an output stream as a single
- * newline-terminated line.
- */
 function writeJsonLine(out: NodeJS.WritableStream, value: unknown): void {
   out.write(`${JSON.stringify(value)}\n`);
 }
 
-/**
- * Translates an interrupt payload (the value passed to `interrupt()` by
- * `humanInterruptNode` or `clarifyInterruptNode`) into the public `CliOutput`
- * event the caller sees on stdout.
- *
- * @remarks
- * Asserts the non-null invariants that hold at each interrupt site — paused
- * at HUMAN_INT means the worker just ran, so `iteration` and `report_path` are
- * set; paused at CLARIFY means the orchestrator's clarify intent is live, so
- * `question` is set. Violations are fail-loud bugs, not soft warnings.
- */
 function mapInterruptToCliOutput(payload: unknown): CliOutputType {
   if (!payload || typeof payload !== 'object') {
     throw new Error(
@@ -141,41 +104,17 @@ function mapInterruptToCliOutput(payload: unknown): CliOutputType {
   throw new Error(`unknown interrupt kind: ${JSON.stringify(p.kind)}`);
 }
 
-/**
- * Result of `readJsonValue()` — `kind:'value'` carries the parsed JSON and
- * the raw text we parsed; `kind:'empty'` means EOF was reached with no
- * non-whitespace input; `kind:'error'` carries the final parse failure plus
- * the raw text so the caller can echo it.
- */
 type JsonReadResult =
   | { kind: 'value'; value: unknown; raw: string }
   | { kind: 'empty' }
   | { kind: 'error'; error: Error; raw: string };
 
-/**
- * Wraps a `readline.Interface` in a small state machine supporting two
- * sequential modes:
- *  1. *resume-JSON read* — `readJsonValue()` accumulates lines until either
- *     `JSON.parse` succeeds on the buffered text or stdin closes. Pretty-
- *     printed multi-line JSON is supported; the buffer terminates at the
- *     first complete value.
- *  2. *dispatch* — after `startDispatch(handler)` is called, every subsequent
- *     line is handed to `handler` until `close()`.
- *
- * @remarks
- * Keeps all stdin ingestion through one `line` event listener so readline's
- * internal buffering stays consistent. Lines that arrive in dispatch mode
- * before `startDispatch` is called are queued and flushed when it is set, so
- * a fast-arriving permission_response cannot be dropped between modes.
- */
 function createStdinReader(input: NodeJS.ReadableStream) {
   const rl = readline.createInterface({ input, crlfDelay: Infinity });
   type Mode = 'json' | 'dispatch';
   let mode: Mode = 'json';
   let jsonBuffer = '';
   let jsonResolver: ((r: JsonReadResult) => void) | null = null;
-  // Holds a settled JSON result that arrived before `readJsonValue()` was
-  // called (e.g. tests that pre-write to stdin) so the next call still sees it.
   let cachedResult: JsonReadResult | null = null;
   let dispatch: ((line: string) => void) | null = null;
   const dispatchQueue: string[] = [];
@@ -232,8 +171,6 @@ function createStdinReader(input: NodeJS.ReadableStream) {
   rl.on('close', () => {
     closed = true;
     if (mode === 'json') {
-      // Settle whatever's buffered. If no consumer is waiting yet, the result
-      // is cached and replayed by the next `readJsonValue()` call.
       settleJson(drainOnClose());
     }
   });
@@ -252,10 +189,6 @@ function createStdinReader(input: NodeJS.ReadableStream) {
     },
     startDispatch(handler: (line: string) => void) {
       dispatch = handler;
-      // `run` mode never calls `readJsonValue`, so mode is still `'json'`
-      // here and incoming `permission_response` lines would otherwise be
-      // accumulated as JSON. Force the transition; flush any text the JSON
-      // buffer happened to capture as dispatch lines so nothing is dropped.
       if (mode === 'json') {
         mode = 'dispatch';
         if (jsonBuffer) {
@@ -280,21 +213,6 @@ function createStdinReader(input: NodeJS.ReadableStream) {
 // Runner
 // ============================================================================
 
-/**
- * Pure core of the `bettervibes` CLI. Returns the process's eventual exit code
- * (0 = success or coarse interrupt, 1 = runtime error, 2 = argv or stdin
- * protocol error).
- *
- * @param deps - Injected I/O streams, graph builder, and checkpointer.
- *
- * @remarks
- * Compiles the graph with the injected checkpointer, bridges the worker's
- * `PermissionGate` over newline-delimited JSON on `deps.stdin` / `deps.stdout`,
- * drains the graph via `stream(streamMode: 'updates')` so it can keep the
- * gate's task context fresh from each node's update, then asks the
- * checkpointer whether the graph paused (coarse interrupt) or terminated
- * (END) to pick the right coarse event to emit.
- */
 export async function runCli(deps: RunCliDeps): Promise<number> {
   const args = parseArgs(deps.argv);
   if (args.mode === 'invalid') {
@@ -306,9 +224,6 @@ export async function runCli(deps: RunCliDeps): Promise<number> {
     checkpointer: deps.checkpointer,
   });
 
-  // Context the PermissionGate closes over. Iteration is populated by the
-  // stream-update observer below; task_id is seeded from argv (run) or from
-  // the checkpointer's pre-invoke snapshot (resume).
   const lastKnownContext: {
     task_id: string | null;
     iteration: number | null;
@@ -360,10 +275,6 @@ export async function runCli(deps: RunCliDeps): Promise<number> {
       return 2;
     }
 
-    // Refuse to invoke the graph when there's nothing to resume — without
-    // this, `stream(Command({resume}))` against an empty/terminated thread
-    // returns `done` with empty task_id/0 iterations, which is
-    // indistinguishable from a successful run that completed normally.
     const pre = await compiled.getState(config);
     const prePending = (pre?.tasks ?? []).flatMap((t) => t.interrupts ?? []);
     if (prePending.length === 0) {
@@ -371,14 +282,12 @@ export async function runCli(deps: RunCliDeps): Promise<number> {
       const event = CliOutput.parse({
         status: 'no_active_task',
         message:
-          'no in-progress task to resume; run `bettervibes run <task-id>` first',
+          'no in-progress task to resume; run `bettervibes run <T-NN>` first',
       });
       writeJsonLine(deps.stdout, event);
       return 2;
     }
 
-    // Seed lastKnownContext from the pre-resume checkpoint so the gate has
-    // accurate task_id/iteration if a permission prompt fires immediately.
     const preValues = (pre?.values ?? {}) as Partial<GraphStateType>;
     if (typeof preValues.task_id === 'string')
       lastKnownContext.task_id = preValues.task_id;
@@ -386,8 +295,6 @@ export async function runCli(deps: RunCliDeps): Promise<number> {
       lastKnownContext.iteration = preValues.iteration;
   }
 
-  // Bail channel — dispatch loop rejects this on malformed stdin; races the
-  // graph stream. Invoke-first-wins with a thrown protocol error.
   let bailReject: (e: Error) => void = () => {};
   const bailPromise = new Promise<never>((_, reject) => {
     bailReject = reject;
@@ -420,6 +327,7 @@ export async function runCli(deps: RunCliDeps): Promise<number> {
   let input: Partial<GraphStateType> | Command<ResumeInputType>;
   if (args.mode === 'run') {
     try {
+      const readIncludeFiles = makeIncludeFiles(deps.paths);
       const included_files = await readIncludeFiles(args.include);
       input = { task_id: args.task_id, included_files };
     } catch (e) {
@@ -439,9 +347,6 @@ export async function runCli(deps: RunCliDeps): Promise<number> {
 
     const drain = (async () => {
       for await (const update of stream) {
-        // Each update is `{ [nodeName]: partialState }`. We look across all
-        // partial states for iteration / task_id writes and mirror them into
-        // lastKnownContext so the gate emits accurate events.
         if (!update || typeof update !== 'object') continue;
         for (const value of Object.values(update)) {
           if (!value || typeof value !== 'object') continue;
@@ -457,8 +362,6 @@ export async function runCli(deps: RunCliDeps): Promise<number> {
   } catch (err) {
     reader.close();
     if (isGraphInterrupt(err)) {
-      // Top-level interrupts are normally suppressed by langgraph's runner
-      // and surface via getState; if one propagates, treat it the same.
       return emitFromCheckpoint(compiled, config, deps, args);
     }
     deps.stderr.write(
@@ -471,12 +374,6 @@ export async function runCli(deps: RunCliDeps): Promise<number> {
   return emitFromCheckpoint(compiled, config, deps, args);
 }
 
-/**
- * Reads the post-run checkpoint and emits the matching `CliOutput` event.
- * Called after the graph stream drains — either because it hit END or because
- * it paused at an interrupt (langgraph suppresses `GraphInterrupt` at the top
- * level; pending interrupts live on the snapshot's tasks).
- */
 async function emitFromCheckpoint(
   compiled: ReturnType<ReturnType<typeof buildBetterVibesGraph>['compile']>,
   config: RunnableConfig,
@@ -502,10 +399,6 @@ async function emitFromCheckpoint(
     values.task_id ?? (args.mode === 'run' ? args.task_id : '');
   const iterations = values.iteration ?? 0;
 
-  // Greenlight is the only path that ends with `human_verdict === 'greenlight'`
-  // at END (graph topology: human_review→greenlight→push_task→END). Clearing
-  // the thread bookends the success path so the next `bettervibes run` starts
-  // on a fresh checkpoint, preventing cross-task message accumulation.
   if (values.human_verdict === 'greenlight') {
     try {
       await clearThread(deps.checkpointer, THREAD_ID);

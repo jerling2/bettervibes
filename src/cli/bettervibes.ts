@@ -1,32 +1,42 @@
 #!/usr/bin/env node
-import path from 'node:path';
-import { mkdirSync } from 'node:fs';
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
+import { resolveProjectRoot } from '../projectRoot';
+import { buildPaths } from '../paths';
 import { buildBetterVibesGraph } from '../graph/graph';
 import { runCli } from './runner';
+import { runInit } from './init';
+import { runInventorySync } from './inventorySync';
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
-/**
- * Absolute path to the SQLite checkpoint file, rooted at the consumer
- * project's cwd. Gitignored by convention; delete `.bettervibes/` to start
- * fresh. The `SqliteSaver` requires the containing directory to exist — we
- * create it on boot along with the three task directories.
- */
-const CHECKPOINT_PATH = path.resolve(
-  process.cwd(),
-  '.bettervibes/checkpoint.sqlite'
-);
+interface ExtractedArgs {
+  projectRootArg?: string;
+  rest: string[];
+}
 
-function ensureBetterVibesDirs(): void {
-  const cwd = process.cwd();
-  mkdirSync(path.resolve(cwd, 'tasks/ingest'), { recursive: true });
-  mkdirSync(path.resolve(cwd, 'tasks/staged'), { recursive: true });
-  mkdirSync(path.resolve(cwd, 'tasks/done'), { recursive: true });
-  mkdirSync(path.dirname(CHECKPOINT_PATH), { recursive: true });
+/**
+ * Strips `--project-root <path>` from argv and returns the override (if any)
+ * and the remaining argv with that flag removed.
+ */
+function extractProjectRoot(argv: string[]): ExtractedArgs {
+  const rest: string[] = [];
+  let projectRootArg: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--project-root') {
+      const value = argv[i + 1];
+      if (typeof value !== 'string' || value.length === 0) {
+        throw new Error('--project-root requires a path argument');
+      }
+      projectRootArg = value;
+      i++;
+      continue;
+    }
+    rest.push(argv[i]);
+  }
+  return { projectRootArg, rest };
 }
 
 // ============================================================================
@@ -34,22 +44,59 @@ function ensureBetterVibesDirs(): void {
 // ============================================================================
 
 async function main(): Promise<number> {
-  ensureBetterVibesDirs();
+  const argv = process.argv.slice(2);
+  let extracted: ExtractedArgs;
+  try {
+    extracted = extractProjectRoot(argv);
+  } catch (err) {
+    process.stderr.write(`${(err as Error).message}\n`);
+    return 2;
+  }
+
+  const subcommand = extracted.rest[0];
+
+  if (subcommand === 'init') {
+    return runInit({
+      projectRootArg: extracted.projectRootArg,
+      cwd: process.cwd(),
+      stdout: process.stdout,
+      stderr: process.stderr,
+    });
+  }
+
+  if (subcommand === 'inventory-sync') {
+    return runInventorySync({
+      projectRootArg: extracted.projectRootArg,
+      cwd: process.cwd(),
+      stdout: process.stdout,
+      stderr: process.stderr,
+    });
+  }
+
+  let root: string;
+  try {
+    root = resolveProjectRoot({ override: extracted.projectRootArg });
+  } catch (err) {
+    process.stderr.write(`${(err as Error).message}\n`);
+    return 2;
+  }
+  const paths = buildPaths(root);
+
   // Cast through `unknown` past the nested `@langchain/langgraph-checkpoint`
-  // version collision between `@langchain/langgraph@0.2.x` (peers 0.0.18) and
-  // `@langchain/langgraph-checkpoint-sqlite@0.2.x` (peers 0.1.x). Same family
-  // of workaround as the `sdkTool` zod v3/v4 cast in orchestrator.ts — runtime
-  // behavior is correct; only the structural-type check is fooled.
+  // version collision between `@langchain/langgraph@0.2.x` and
+  // `@langchain/langgraph-checkpoint-sqlite@0.2.x`.
   const checkpointer = SqliteSaver.fromConnString(
-    CHECKPOINT_PATH
+    paths.checkpoint
   ) as unknown as BaseCheckpointSaver;
+
   return runCli({
-    argv: process.argv.slice(2),
+    argv: extracted.rest,
     stdin: process.stdin,
     stdout: process.stdout,
     stderr: process.stderr,
-    buildGraph: buildBetterVibesGraph,
+    buildGraph: () => buildBetterVibesGraph(paths),
     checkpointer,
+    paths,
   });
 }
 
