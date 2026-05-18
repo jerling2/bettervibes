@@ -1,13 +1,24 @@
 jest.mock('fs/promises');
 
-import { readFile, access, readdir, rename } from 'fs/promises';
-import { fetchTaskNode, pushTaskNode } from './fetchPushNodes';
+import {
+  access,
+  readdir,
+  readFile,
+  rename,
+  writeFile,
+} from 'fs/promises';
+import { makeFetchPushNodes } from './fetchPushNodes';
+import { buildPaths } from '../paths';
 import type { GraphStateType } from './state';
 
 const mockReadFile = readFile as jest.MockedFunction<typeof readFile>;
+const mockWriteFile = writeFile as jest.MockedFunction<typeof writeFile>;
 const mockAccess = access as jest.MockedFunction<typeof access>;
 const mockReaddir = readdir as unknown as jest.Mock;
 const mockRename = rename as jest.MockedFunction<typeof rename>;
+
+const PATHS = buildPaths('/abs/proj');
+const { fetchTaskNode, pushTaskNode } = makeFetchPushNodes(PATHS);
 
 const ENOENT = Object.assign(new Error('enoent'), { code: 'ENOENT' });
 
@@ -15,7 +26,7 @@ const baseState: GraphStateType = {
   messages: [],
   baseline_messages: [],
   accumulated_notes: [],
-  task_id: 'smoke',
+  task_id: 'T-01',
   task_content: null,
   task_metadata: null,
   iteration: null,
@@ -25,82 +36,114 @@ const baseState: GraphStateType = {
   included_files: [],
 };
 
-describe('fetchTaskNode', () => {
+describe('fetchTaskNode (factory)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockWriteFile.mockResolvedValue(undefined as unknown as void);
+    mockRename.mockResolvedValue(undefined as unknown as void);
   });
 
-  it('should read tasks/ingest/{task_id}.md and populate task_content with empty metadata', async () => {
-    mockReadFile.mockResolvedValue('# smoke task body');
+  it('reads the task spec from tasks/new/T-NN-* and populates state', async () => {
+    mockReaddir.mockResolvedValue(['T-01-2026-05-07.md']);
+    mockReadFile.mockResolvedValue('# Task: add auth\n\nbody');
 
     const result = await fetchTaskNode(baseState);
 
-    expect(result).toEqual({
-      task_content: '# smoke task body',
-      task_metadata: {},
-    });
-    expect(mockReadFile).toHaveBeenCalledTimes(1);
+    expect(result.task_content).toContain('# Task: add auth');
+    expect(result.task_metadata).toEqual({});
     const [calledPath] = mockReadFile.mock.calls[0];
-    expect(calledPath).toMatch(/tasks[\\/]ingest[\\/]smoke\.md$/);
+    expect(calledPath).toMatch(
+      /bv_orchestration[\\/]tasks[\\/]new[\\/]T-01-2026-05-07\.md$/
+    );
   });
 
-  it('should expose parsed frontmatter on task_metadata and strip it from task_content', async () => {
+  it('moves the spec to tasks/stage and flips status to stage', async () => {
+    mockReaddir.mockResolvedValue(['T-01-2026-05-07.md']);
     mockReadFile.mockResolvedValue(
-      '---\nidempotency_check: true\n---\n# smoke task body'
+      '---\nstatus: new\n---\n# Task: add auth\n\nbody'
     );
 
-    const result = await fetchTaskNode(baseState);
+    await fetchTaskNode(baseState);
 
-    expect(result.task_metadata).toEqual({ idempotency_check: true });
-    expect(result.task_content).toContain('# smoke task body');
-    expect(result.task_content).not.toContain('idempotency_check');
+    expect(mockWriteFile).toHaveBeenCalledTimes(1);
+    const [writePath, writtenRaw] = mockWriteFile.mock.calls[0];
+    expect(writePath).toMatch(
+      /bv_orchestration[\\/]tasks[\\/]new[\\/]T-01-2026-05-07\.md$/
+    );
+    expect(String(writtenRaw)).toContain('status: stage');
+    expect(mockRename).toHaveBeenCalledTimes(1);
+    const [from, to] = mockRename.mock.calls[0];
+    expect(from).toMatch(
+      /bv_orchestration[\\/]tasks[\\/]new[\\/]T-01-2026-05-07\.md$/
+    );
+    expect(to).toMatch(
+      /bv_orchestration[\\/]tasks[\\/]stage[\\/]T-01-2026-05-07\.md$/
+    );
   });
 
-  it('should throw when task_id is null', async () => {
+  it('throws when task_id is null', async () => {
     await expect(
       fetchTaskNode({ ...baseState, task_id: null })
     ).rejects.toThrow(/task_id/i);
     expect(mockReadFile).not.toHaveBeenCalled();
   });
 
-  it('should propagate ENOENT from readTaskFile as "Task not found"', async () => {
-    mockReadFile.mockRejectedValue(ENOENT);
+  it('throws "Task not found" when no file matches the prefix', async () => {
+    mockReaddir.mockResolvedValue(['T-99-2026-05-07.md']);
 
-    await expect(fetchTaskNode(baseState)).rejects.toThrow(
-      /Task not found.*smoke\.md/
-    );
+    await expect(fetchTaskNode(baseState)).rejects.toThrow(/Task not found/);
   });
 });
 
-describe('pushTaskNode', () => {
+describe('pushTaskNode (factory)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockAccess.mockRejectedValue(ENOENT);
-    mockRename.mockResolvedValue(undefined);
+    mockRename.mockResolvedValue(undefined as unknown as void);
+    mockWriteFile.mockResolvedValue(undefined as unknown as void);
+    mockReadFile.mockResolvedValue(
+      '---\nstatus: stage\n---\n# Task: add auth\n'
+    );
   });
 
-  it('should call pushReports with state.task_id and return an empty update', async () => {
-    mockReaddir.mockResolvedValue(['smoke-01.md']);
+  it('moves the task spec from stage/ to done/', async () => {
+    mockReaddir.mockResolvedValue(['T-01-2026-05-07.md']);
 
     const result = await pushTaskNode(baseState);
 
     expect(result).toEqual({});
     expect(mockRename).toHaveBeenCalledTimes(1);
     const [from, to] = mockRename.mock.calls[0];
-    expect(from).toMatch(/tasks[\\/]staged[\\/]smoke-01\.md$/);
-    expect(to).toMatch(/tasks[\\/]done[\\/]smoke-01\.md$/);
+    expect(from).toMatch(
+      /bv_orchestration[\\/]tasks[\\/]stage[\\/]T-01-2026-05-07\.md$/
+    );
+    expect(to).toMatch(
+      /bv_orchestration[\\/]tasks[\\/]done[\\/]T-01-2026-05-07\.md$/
+    );
   });
 
-  it('should throw when task_id is null', async () => {
+  it('flips frontmatter status from stage to done', async () => {
+    mockReaddir.mockResolvedValue(['T-01-2026-05-07.md']);
+
+    await pushTaskNode(baseState);
+
+    expect(mockWriteFile).toHaveBeenCalledTimes(1);
+    const [, writtenRaw] = mockWriteFile.mock.calls[0];
+    expect(String(writtenRaw)).toContain('status: done');
+  });
+
+  it('throws when task_id is null', async () => {
     await expect(
       pushTaskNode({ ...baseState, task_id: null })
     ).rejects.toThrow(/task_id/i);
     expect(mockReaddir).not.toHaveBeenCalled();
   });
 
-  it('should propagate "no staged reports" when nothing matches', async () => {
+  it('throws when no spec is in stage/', async () => {
     mockReaddir.mockResolvedValue([]);
 
-    await expect(pushTaskNode(baseState)).rejects.toThrow(/no staged reports/i);
+    await expect(pushTaskNode(baseState)).rejects.toThrow(
+      /Task spec not in stage/
+    );
   });
 });

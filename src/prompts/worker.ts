@@ -1,4 +1,3 @@
-import { formatReportFilename } from '../tools/commitTask';
 import type { TaskMetadata } from '../tools/fetchTask';
 
 // ============================================================================
@@ -10,6 +9,7 @@ export interface WorkerPromptParams {
   taskContent: string;
   taskId: string;
   iteration: number;
+  reportPath: string;
   metadata: TaskMetadata | null;
 }
 
@@ -17,32 +17,18 @@ export interface WorkerPromptParams {
 // Helpers
 // ============================================================================
 
-const STAGED_DIR_REL = 'tasks/staged';
-
-/**
- * Pre-flight idempotency check prepended to the worker prompt when the task's
- * frontmatter sets `idempotency_check: true`.
- *
- * @remarks
- * Lets the worker close out a regenerated task whose work is already in place
- * (under a different ID from a prior run) without redoing it. The "No-op"
- * report still flows through `human_review` — the heading is a convention for
- * the reviewer, not a parsed signal. False-skip is more dangerous than
- * redundant work, so the instruction biases toward doing the work when in
- * doubt.
- */
 export const PREFLIGHT_IDEMPOTENCY_INSTRUCTION = `## Pre-flight: idempotency check
 
 Before doing any work, inspect the current codebase against the task below.
 This task may have been completed under a different ID in a previous run.
 
-If the task body contains an "Acceptance criteria" section, probe each
+If the task body contains an "Acceptance Criteria" section, probe each
 criterion against the current state. If it contains a "Touches" section,
 inspect those files/modules for prior implementation. Otherwise reason from
 the task description as a whole.
 
 If you judge the work is already in place, do NOT redo it. Write your report
-to the staged path with the heading "No-op: already complete" followed by a
+to the report path with the heading "No-op: already complete" followed by a
 short evidence summary (which criteria are satisfied, which files contain
 the implementation, any caveats). Then exit.
 
@@ -54,6 +40,67 @@ review, but a false skip silently drops a task.
 
 `;
 
+const REPORT_STRUCTURE_GUIDE = `Write the report at the path named below using
+this structure (matches \`docs/templates/WORKER_REPORT_TEMPLATE.md\`):
+
+\`\`\`
+---
+model: <AI model name>
+prd-source: <path relative to project root>
+date: YYYY-MM-DD
+status: red | green
+---
+
+# Worker Report: <feature-slug>
+
+## Executive Summary
+
+<2-5 sentences. What was attempted, what landed, what didn't, and the
+recommended decision (greenlight or redlight).>
+
+## Implementation
+
+*What you actually did.*
+
+- <action / change>
+
+## Files Touched
+
+*Created, modified, or deleted in this iteration.*
+
+- \`path/to/file\` — <one-line summary>
+
+## Acceptance Criteria Status
+
+*Mirror each criterion from the task's \`## Acceptance Criteria\`. Drop this
+section if the task did not declare criteria.*
+
+- **<criterion>** — met | unmet | partial — <one-line evidence>
+
+## Locked-in Decisions
+
+*Decisions you made when the spec did not resolve a choice you faced. Each
+entry: the gap, the call, and the reasoning.*
+
+- **<decision>** — Spec did not specify <X>. Worker chose <Y> because
+  <reason>.
+
+## Open Questions
+
+*Deviations from the spec, ambiguities, or anything to flag for the human
+reviewer. Leave genuinely open — do not propose tentative answers.*
+
+Q1: <question>?
+
+## Appendix A: Worker's Narrative
+
+*First-person account in a precise, behavioral register. Stay grounded in
+what you actually did and decided. Do not claim interior experience (no
+"felt", "noticed", "sensed").*
+
+<narrative>
+\`\`\``;
+
 // ============================================================================
 // Prompt Builder
 // ============================================================================
@@ -61,33 +108,26 @@ review, but a false skip silently drops a task.
 /**
  * Builds the single user message the worker sends to the Claude Agent SDK.
  *
- * @param params - Orchestrator-supplied instructions, the raw task content,
- *   the task_id, the current iteration, and parsed task metadata. The task_id
- *   and iteration drive the report path, which must match what `commitTask`
- *   validates against. Metadata may be null on legacy paths; only
- *   `idempotency_check === true` alters the prompt today.
- *
  * @remarks
- * Structure follows spec §3.2: orchestrator's synthesized instructions,
- * then the task file's content, then a trailing directive pointing the
- * worker at the exact staged report path. The filename is produced by
- * `formatReportFilename` so the worker writes to the same location
- * `verifyReportFile` checks. When `metadata.idempotency_check` is true the
+ * `reportPath` must be an absolute path so the worker writes to the
+ * canonical reports directory regardless of any cwd shifts during task
+ * execution; it is the exact path `commitTask` verifies against.
+ * When `metadata.idempotency_check` is true the
  * `PREFLIGHT_IDEMPOTENCY_INSTRUCTION` block is prepended verbatim.
  */
 export function buildWorkerPrompt(params: WorkerPromptParams): string {
-  const filename = formatReportFilename(params.taskId, params.iteration);
-  const reportPath = `${STAGED_DIR_REL}/${filename}`;
   const preflight = params.metadata?.idempotency_check
     ? PREFLIGHT_IDEMPOTENCY_INSTRUCTION
     : '';
   return `${preflight}${params.instructions}
 
-## Task (${params.taskId}.md)
+## Task (${params.taskId})
 
 ${params.taskContent}
 
 ---
 
-When you are done, write a factual report to \`${reportPath}\` describing what you did and any deviations from the task spec.`;
+When you are done, write a factual report to \`${params.reportPath}\` describing what you did and any deviations from the task spec.
+
+${REPORT_STRUCTURE_GUIDE}`;
 }

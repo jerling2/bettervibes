@@ -1,26 +1,14 @@
 import path from 'node:path';
-import { readFile } from 'fs/promises';
+import { readdir, readFile } from 'fs/promises';
 import matter from 'gray-matter';
 import { z } from 'zod';
 import { assertValidTaskId } from './taskId';
+import type { Paths } from '../paths';
 
 // ============================================================================
 // Schemas
 // ============================================================================
 
-/**
- * Recognized fields in a task ingest file's YAML frontmatter.
- *
- * @remarks
- * Unknown keys are preserved (`passthrough`) so users can stash forward-
- * compatible metadata or upstream tooling fields like `task_id` without the
- * orchestrator rejecting them. Validation only enforces the *types* of the
- * keys the orchestrator acts on.
- *
- * `idempotency_check` opts a task into a pre-flight idempotency probe in the
- * worker's prompt. See `PREFLIGHT_IDEMPOTENCY_INSTRUCTION` in
- * `src/prompts/worker.ts`.
- */
 export const TaskMetadataSchema = z
   .object({
     idempotency_check: z.boolean().optional(),
@@ -30,55 +18,62 @@ export const TaskMetadataSchema = z
 export type TaskMetadata = z.infer<typeof TaskMetadataSchema>;
 
 // ============================================================================
-// Helpers
+// Types & Interfaces
 // ============================================================================
-
-/**
- * Absolute path to the task source-of-truth directory.
- *
- * @remarks
- * Resolved from the consumer project's cwd — `bettervibes` is a portable CLI
- * that expects `tasks/ingest/` to live inside the project it's invoked from.
- * The directory is created on CLI boot if missing.
- */
-const INGEST_DIR = path.resolve(process.cwd(), 'tasks/ingest');
 
 export interface TaskFile {
   body: string;
   metadata: TaskMetadata;
+  filename: string;
 }
 
-/**
- * Reads and parses a task ingest file.
- *
- * @param taskId - The task identifier. Resolved to {INGEST_DIR}/{taskId}.md.
- *   Callers pass the id from graph state; no transformation is applied.
- *
- * @returns The markdown body (frontmatter stripped) and the parsed metadata.
- *   Files without frontmatter return `metadata = {}`.
- *
- * @remarks
- * Raises "Task not found" when the file is missing and re-throws other
- * filesystem errors verbatim. Frontmatter that fails YAML parsing or zod
- * validation throws per the fail-loud policy (§1.2). Unknown keys in
- * frontmatter pass through validation; only typed keys (e.g. boolean
- * `idempotency_check`) are enforced.
- */
-async function readTaskFile(taskId: string): Promise<TaskFile> {
-  assertValidTaskId(taskId);
-  const filePath = path.join(INGEST_DIR, `${taskId}.md`);
-  let raw: string;
+// ============================================================================
+// Helpers
+// ============================================================================
+
+async function findTaskFile(
+  dir: string,
+  taskId: string
+): Promise<string | null> {
+  let entries: string[];
   try {
-    raw = await readFile(filePath, 'utf8');
+    entries = await readdir(dir);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error(`Task not found: ${filePath}`);
-    }
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw err;
   }
-  const parsed = matter(raw);
-  const metadata = TaskMetadataSchema.parse(parsed.data);
-  return { body: parsed.content, metadata };
+  const prefix = `${taskId}-`;
+  const matches = entries.filter(
+    (name) => name.startsWith(prefix) && name.endsWith('.md')
+  );
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    matches.sort();
+  }
+  return matches[0];
 }
 
-export { readTaskFile };
+// ============================================================================
+// Factory
+// ============================================================================
+
+/**
+ * Builds a `readTaskFile` bound to the resolved Paths. Reads the task spec
+ * from `tasksNew/T-NN-*.md` (matched by the `T-NN-` prefix).
+ */
+export function makeFetchTask(paths: Paths) {
+  return async function readTaskFile(taskId: string): Promise<TaskFile> {
+    assertValidTaskId(taskId);
+    const filename = await findTaskFile(paths.tasksNew, taskId);
+    if (filename === null) {
+      throw new Error(
+        `Task not found: ${path.join(paths.tasksNew, `${taskId}-*.md`)}`
+      );
+    }
+    const filePath = path.join(paths.tasksNew, filename);
+    const raw = await readFile(filePath, 'utf8');
+    const parsed = matter(raw);
+    const metadata = TaskMetadataSchema.parse(parsed.data);
+    return { body: parsed.content, metadata, filename };
+  };
+}

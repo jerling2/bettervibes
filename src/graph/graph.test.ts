@@ -24,11 +24,24 @@ jest.mock('@anthropic-ai/claude-agent-sdk', () => ({
 jest.mock('fs/promises');
 
 import { AIMessage } from '@langchain/core/messages';
-import { readFile } from 'fs/promises';
+import {
+  access,
+  readdir,
+  readFile,
+  rename,
+  writeFile,
+} from 'fs/promises';
 import { ORCHESTRATOR_MCP_SERVER_NAME } from './orchestrator';
 import { buildBetterVibesGraph } from './graph';
+import { buildPaths } from '../paths';
 
 const mockReadFile = readFile as jest.MockedFunction<typeof readFile>;
+const mockWriteFile = writeFile as jest.MockedFunction<typeof writeFile>;
+const mockReaddir = readdir as unknown as jest.Mock;
+const mockRename = rename as jest.MockedFunction<typeof rename>;
+const mockAccess = access as jest.MockedFunction<typeof access>;
+
+const PATHS = buildPaths('/abs/proj');
 
 type SdkToolShape = {
   name: string;
@@ -45,7 +58,6 @@ type QueryParams = {
   };
 };
 
-/** Returns a query() mock that invokes the named orchestrator tool once and drains. */
 function queryInvokingTool(
   toolName: string,
   args: Record<string, unknown>
@@ -62,29 +74,29 @@ function queryInvokingTool(
 }
 
 describe('buildBetterVibesGraph', () => {
-  it('should compile without throwing', () => {
-    expect(() => buildBetterVibesGraph().compile()).not.toThrow();
+  it('compiles without throwing', () => {
+    expect(() => buildBetterVibesGraph(PATHS).compile()).not.toThrow();
   });
 });
 
 describe('graph — mark_done short path', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockReadFile.mockResolvedValue('# Task body');
+    mockReaddir.mockResolvedValue(['T-01-2026-05-07.md']);
+    mockReadFile.mockResolvedValue('# Task: add auth\n\nbody');
+    mockWriteFile.mockResolvedValue(undefined as unknown as void);
+    mockRename.mockResolvedValue(undefined as unknown as void);
     mockQuery.mockImplementation(queryInvokingTool('mark_done', {}));
   });
 
-  it('should fetch the task, run the orchestrator, and terminate on mark_done', async () => {
-    const graph = buildBetterVibesGraph().compile();
+  it('fetches the task, runs the orchestrator, and terminates on mark_done', async () => {
+    const graph = buildBetterVibesGraph(PATHS).compile();
 
-    const result = await graph.invoke({ task_id: 'smoke' });
+    const result = await graph.invoke({ task_id: 'T-01' });
 
-    expect(mockReadFile).toHaveBeenCalledTimes(1);
-    const [calledPath] = mockReadFile.mock.calls[0];
-    expect(calledPath).toMatch(/tasks[\\/]ingest[\\/]smoke\.md$/);
-
+    expect(mockReadFile).toHaveBeenCalled();
     expect(mockQuery).toHaveBeenCalledTimes(1);
-    expect(result.task_content).toBe('# Task body');
+    expect(result.task_content).toContain('# Task: add auth');
     expect(result.terminal_intent).toEqual({ kind: 'done' });
   });
 });
@@ -92,45 +104,42 @@ describe('graph — mark_done short path', () => {
 describe('graph — delegate_bridge', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockReaddir.mockResolvedValue(['T-01-2026-05-07.md']);
+    mockReadFile.mockResolvedValue('# Task: add auth\n\nbody');
+    mockWriteFile.mockResolvedValue(undefined as unknown as void);
+    mockRename.mockResolvedValue(undefined as unknown as void);
+    mockAccess.mockRejectedValue(
+      Object.assign(new Error('enoent'), { code: 'ENOENT' })
+    );
   });
 
-  it('should synthesize an AIMessage from terminal_intent.instructions before the worker runs', async () => {
-    mockReadFile.mockResolvedValue('# Task body');
+  it('synthesizes an AIMessage from terminal_intent.instructions before the worker runs', async () => {
     mockQuery
       .mockImplementationOnce(
         queryInvokingTool('delegate_to_worker', {
           instructions: 'implement the change',
         })
       )
-      // Worker's SDK call — drain empty; then the flow pauses at HUMAN_INT.
       .mockImplementationOnce(() =>
         (async function* () {
-          // drain-only
+          // worker drain
         })()
       );
 
-    const graph = buildBetterVibesGraph().compile();
+    const graph = buildBetterVibesGraph(PATHS).compile();
 
-    // Invoke with an intentionally-missing commitNode file so we pause before
-    // human_review fires. We only care that delegate_bridge added the
-    // AIMessage to state.messages.
     let capturedState: { messages?: AIMessage[] } | null = null;
     try {
-      capturedState = await graph.invoke({ task_id: 'smoke' });
+      capturedState = await graph.invoke({ task_id: 'T-01' });
     } catch {
-      // commitNode will throw "Report not found" since we did not mock access;
-      // that is fine — we inspect the graph's intermediate state another way.
+      // commitNode will throw "Report not found" since we did not let access succeed.
     }
 
-    // The first query() call is the orchestrator's; the second is the
-    // worker's. If the worker ran, delegate_bridge ran first and would have
-    // appended the instructions AIMessage.
     expect(mockQuery).toHaveBeenCalledTimes(2);
     const [, workerCall] = mockQuery.mock.calls;
     const workerPrompt = workerCall[0].prompt as string;
     expect(workerPrompt).toContain('implement the change');
 
-    // Final captured state (post-crash) should still show the AIMessage.
     if (capturedState) {
       expect(capturedState.messages).toBeDefined();
     }

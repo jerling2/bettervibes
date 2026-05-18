@@ -17,7 +17,8 @@ const baseState: GraphStateType = {
   task_content: '# Task',
   task_metadata: null,
   iteration: 1,
-  report_path: '/abs/tasks/staged/smoke-01.md',
+  report_path:
+    '/abs/proj/bv_orchestration/logs/worker-reports/WR-01-smoke-2026-05-07.md',
   terminal_intent: null,
   human_verdict: null,
   included_files: [],
@@ -39,7 +40,8 @@ describe('humanInterruptNode', () => {
       kind: 'human_review',
       task_id: 'smoke',
       iteration: 1,
-      report_path: '/abs/tasks/staged/smoke-01.md',
+      report_path:
+    '/abs/proj/bv_orchestration/logs/worker-reports/WR-01-smoke-2026-05-07.md',
     });
   });
 

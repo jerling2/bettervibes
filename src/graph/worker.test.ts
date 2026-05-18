@@ -5,18 +5,28 @@ jest.mock('fs/promises');
 
 import { AIMessage, HumanMessage } from '@langchain/core/messages';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { access } from 'fs/promises';
+import {
+  access,
+  readdir,
+  readFile,
+  writeFile,
+} from 'fs/promises';
 import { PermissionGate } from './permissionGate';
 import {
-  commitNode,
-  execNode,
+  buildWorkerSubgraph,
   extractInstructions,
-  initNode,
-  workerSubgraph,
+  makeInitNode,
 } from './worker';
+import { buildPaths } from '../paths';
 
 const mockQuery = query as jest.MockedFunction<typeof query>;
 const mockAccess = access as jest.MockedFunction<typeof access>;
+const mockReaddir = readdir as unknown as jest.Mock;
+const mockReadFile = readFile as jest.MockedFunction<typeof readFile>;
+const mockWriteFile = writeFile as jest.MockedFunction<typeof writeFile>;
+
+const PATHS = buildPaths('/abs/proj');
+const workerSubgraph = buildWorkerSubgraph(PATHS);
 
 function makeEmptyQuery() {
   const gen: AsyncGenerator<unknown, void> = (async function* () {
@@ -36,8 +46,8 @@ const baseState = {
   messages: [new AIMessage('Do the thing carefully.')],
   baseline_messages: [],
   accumulated_notes: [],
-  task_id: 'smoke',
-  task_content: '# Task\n\nSteps here.',
+  task_id: 'T-01',
+  task_content: '# Task: add auth\n\nSteps here.',
   task_metadata: null,
   iteration: 1,
   report_path: null,
@@ -47,22 +57,52 @@ const baseState = {
 };
 
 describe('initNode', () => {
-  it('should set iteration to 1 when currently null', async () => {
+  const initNode = makeInitNode(PATHS);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('returns 1 when the reports directory is empty', async () => {
+    mockReaddir.mockResolvedValue([]);
+
+    const result = await initNode({ ...baseState, iteration: null });
+
+    expect(result).toEqual({ iteration: 1 });
+    expect(mockReaddir).toHaveBeenCalledWith(PATHS.reports);
+  });
+
+  it('returns 1 when the reports directory does not exist', async () => {
+    const enoent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    mockReaddir.mockRejectedValue(enoent);
+
     const result = await initNode({ ...baseState, iteration: null });
 
     expect(result).toEqual({ iteration: 1 });
   });
 
-  it('should increment iteration when already set', async () => {
-    const result = await initNode({ ...baseState, iteration: 1 });
+  it('returns max + 1 across contiguous WR-NN files', async () => {
+    mockReaddir.mockResolvedValue([
+      'WR-01-add-auth-2026-05-07.md',
+      'WR-02-add-auth-2026-05-08.md',
+    ]);
 
-    expect(result).toEqual({ iteration: 2 });
+    const result = await initNode({ ...baseState, iteration: null });
+
+    expect(result).toEqual({ iteration: 3 });
   });
 
-  it('should increment from a higher iteration', async () => {
-    const result = await initNode({ ...baseState, iteration: 5 });
+  it('returns max + 1 across non-contiguous WR-NN files and ignores non-matching entries', async () => {
+    mockReaddir.mockResolvedValue([
+      'WR-04-foo-2026-05-07.md',
+      'WR-07-bar-2026-05-08.md',
+      'unrelated.txt',
+      'README.md',
+    ]);
 
-    expect(result).toEqual({ iteration: 6 });
+    const result = await initNode({ ...baseState, iteration: null });
+
+    expect(result).toEqual({ iteration: 8 });
   });
 });
 
@@ -85,31 +125,52 @@ describe('extractInstructions', () => {
   });
 });
 
-describe('execNode', () => {
+describe('workerSubgraph (integration)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockQuery.mockReturnValue(makeEmptyQuery());
+    mockAccess.mockResolvedValue(undefined as unknown as void);
+    mockReaddir.mockResolvedValue(['T-01-2026-05-07.md']);
+    mockReadFile.mockResolvedValue(
+      '---\nstatus: stage\nworker-reports: []\n---\n# Task: add auth\n'
+    );
+    mockWriteFile.mockResolvedValue(undefined as unknown as void);
   });
 
-  it('should invoke query with the prompt built from state', async () => {
-    await execNode(baseState);
+  it('builds a prompt referencing the WR-NN report path under bv_orchestration/logs/worker-reports/', async () => {
+    await workerSubgraph.invoke({
+      messages: [new AIMessage('orchestrator instructions')],
+      task_id: 'T-01',
+      task_content: '# Task: add auth',
+      iteration: null,
+    });
 
-    expect(mockQuery).toHaveBeenCalledTimes(1);
     const [args] = mockQuery.mock.calls[0];
-    expect(args.prompt).toContain('Do the thing carefully.');
-    expect(args.prompt).toContain('# Task');
-    expect(args.prompt).toContain('smoke-01.md');
+    expect(args.prompt).toContain('orchestrator instructions');
+    expect(args.prompt).toContain(
+      'bv_orchestration/logs/worker-reports/WR-01-add-auth-'
+    );
   });
 
-  it('should pass the consumer project cwd to the SDK', async () => {
-    await execNode(baseState);
+  it('passes the resolved project root as the SDK cwd', async () => {
+    await workerSubgraph.invoke({
+      messages: [new AIMessage('orchestrator instructions')],
+      task_id: 'T-01',
+      task_content: '# Task: add auth',
+      iteration: null,
+    });
 
     const [args] = mockQuery.mock.calls[0];
-    expect(args.options?.cwd).toBe(process.cwd());
+    expect(args.options?.cwd).toBe(PATHS.root);
   });
 
-  it('should pass the Claude Code default allowedTools', async () => {
-    await execNode(baseState);
+  it('passes the Claude Code default allowedTools', async () => {
+    await workerSubgraph.invoke({
+      messages: [new AIMessage('orchestrator instructions')],
+      task_id: 'T-01',
+      task_content: '# Task: add auth',
+      iteration: null,
+    });
 
     const [args] = mockQuery.mock.calls[0];
     expect(args.options?.allowedTools).toEqual(
@@ -117,111 +178,59 @@ describe('execNode', () => {
     );
   });
 
-  it('should drain the async iterator to completion', async () => {
-    const next = jest.fn().mockResolvedValue({ done: true, value: undefined });
-    mockQuery.mockReturnValue({
-      [Symbol.asyncIterator]() {
-        return this;
-      },
-      next,
-    } as unknown as ReturnType<typeof query>);
-
-    await execNode(baseState);
-
-    expect(next).toHaveBeenCalled();
-  });
-
-  it('should propagate errors thrown by the SDK iterator', async () => {
-    mockQuery.mockReturnValue(makeThrowingQuery('boom'));
-
-    await expect(execNode(baseState)).rejects.toThrow('boom');
-  });
-
-  it('should return an empty partial state (no message updates)', async () => {
-    const result = await execNode(baseState);
-
-    expect(result).toEqual({});
-  });
-
-  it('should pass gate.canUseTool and permissionMode=default when a gate is injected', async () => {
-    const gate = new PermissionGate({
-      allowlist: ['Read'],
-      emit: jest.fn(),
-      context: () => ({ task_id: 'smoke', iteration: 1 }),
+  it('runs init → exec → commit and populates iteration + report_path', async () => {
+    const result = await workerSubgraph.invoke({
+      messages: [new AIMessage('orchestrator instructions')],
+      task_id: 'T-01',
+      task_content: '# Task: add auth',
+      iteration: null,
     });
 
-    await execNode(baseState, { configurable: { permissionGate: gate } });
-
-    const [args] = mockQuery.mock.calls[0];
-    expect(args.options?.canUseTool).toBe(gate.canUseTool);
-    expect(args.options?.permissionMode).toBe('default');
+    expect(result.iteration).toBe(1);
+    expect(result.report_path).toMatch(
+      /bv_orchestration[\\/]logs[\\/]worker-reports[\\/]WR-01-add-auth-\d{4}-\d{2}-\d{2}\.md$/
+    );
+    expect(mockQuery).toHaveBeenCalledTimes(1);
   });
 
-  it('should fall back to dontAsk and omit canUseTool when no gate is injected', async () => {
-    await execNode(baseState);
+  it('propagates errors thrown by the SDK iterator', async () => {
+    mockQuery.mockReturnValue(makeThrowingQuery('boom'));
+
+    await expect(
+      workerSubgraph.invoke({
+        messages: [new AIMessage('orchestrator instructions')],
+        task_id: 'T-01',
+        task_content: '# Task: add auth',
+        iteration: null,
+      })
+    ).rejects.toThrow('boom');
+  });
+
+  it('falls back to dontAsk and omits canUseTool when no gate is injected', async () => {
+    await workerSubgraph.invoke({
+      messages: [new AIMessage('orchestrator instructions')],
+      task_id: 'T-01',
+      task_content: '# Task: add auth',
+      iteration: null,
+    });
 
     const [args] = mockQuery.mock.calls[0];
     expect(args.options?.permissionMode).toBe('dontAsk');
     expect(args.options?.canUseTool).toBeUndefined();
   });
-});
 
-describe('commitNode', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
-  it('should call verifyReportFile and return report_path', async () => {
-    mockAccess.mockResolvedValue(undefined);
-
-    const result = await commitNode(baseState);
-
-    expect(mockAccess).toHaveBeenCalledTimes(1);
-    expect(result.report_path).toMatch(/tasks[\\/]staged[\\/]smoke-01\.md$/);
-  });
-
-  it('should propagate ENOENT from verifyReportFile as "Report not found"', async () => {
-    mockAccess.mockRejectedValue(
-      Object.assign(new Error('enoent'), { code: 'ENOENT' })
-    );
-
-    await expect(commitNode(baseState)).rejects.toThrow(/Report not found/i);
-  });
-});
-
-describe('workerSubgraph (integration)', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    mockQuery.mockReturnValue(makeEmptyQuery());
-    mockAccess.mockResolvedValue(undefined);
-  });
-
-  it('should run init → exec → commit and populate iteration + report_path', async () => {
-    const result = await workerSubgraph.invoke({
-      messages: [new AIMessage('orchestrator instructions')],
-      task_id: 'smoke',
-      task_content: '# Task',
-      iteration: null,
-    });
-
-    expect(result.iteration).toBe(1);
-    expect(result.report_path).toMatch(/tasks[\\/]staged[\\/]smoke-01\.md$/);
-    expect(mockQuery).toHaveBeenCalledTimes(1);
-    expect(mockAccess).toHaveBeenCalledTimes(1);
-  });
-
-  it('should wire the injected gate into the SDK call when invoked with configurable', async () => {
+  it('wires the injected gate into the SDK call when invoked with configurable', async () => {
     const gate = new PermissionGate({
       allowlist: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep'],
       emit: jest.fn(),
-      context: () => ({ task_id: 'smoke', iteration: 1 }),
+      context: () => ({ task_id: 'T-01', iteration: 1 }),
     });
 
     await workerSubgraph.invoke(
       {
         messages: [new AIMessage('orchestrator instructions')],
-        task_id: 'smoke',
-        task_content: '# Task',
+        task_id: 'T-01',
+        task_content: '# Task: add auth',
         iteration: null,
       },
       { configurable: { permissionGate: gate } }

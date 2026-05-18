@@ -80,9 +80,6 @@ rg -n 'bettervibes run|bettervibes resume|--include|no_active_task|push target e
 
 - **Redesigning doc structure**: this is a sync skill, not a redesign skill.
   Don't rearrange sections or invent new ones.
-- **Editing the spec**: `docs/orchestration/orchestration.spec.v1.md` has
-  its own change process via the `changelog-entry` skill. Append to the
-  changelog instead of editing the spec.
 - **Triggering on internal refactors**: graph topology, prompt content,
   checkpointer storage are not user-visible and not in scope.
 - **Paraphrasing wire-format strings**: when the docs quote a JSON event,
@@ -94,5 +91,3 @@ rg -n 'bettervibes run|bettervibes resume|--include|no_active_task|push target e
 - `quick_start_guide.md` §3, §4, §6 — the anchors this skill maintains.
 - `src/cli/runner.ts` — argv parsing, exit codes, coarse-event emission.
 - `src/cli/schemas.ts` — wire schemas for both directions.
-- `.claude/skills/changelog-entry/SKILL.md` — sibling skill for spec
-  changes; route there if the change is conceptual rather than wire-level.

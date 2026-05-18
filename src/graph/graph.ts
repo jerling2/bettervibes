@@ -1,33 +1,17 @@
 import { END, START, StateGraph } from '@langchain/langgraph';
 import { AIMessage } from '@langchain/core/messages';
 import { routeTerminalIntent, routeVerdict } from './edges';
-import { fetchTaskNode, pushTaskNode } from './fetchPushNodes';
+import { makeFetchPushNodes } from './fetchPushNodes';
 import { clarifyInterruptNode, humanInterruptNode } from './interrupts';
 import { orchestratorNode } from './orchestrator';
 import { GraphState, type GraphStateType } from './state';
-import { workerSubgraph } from './worker';
+import { buildWorkerSubgraph } from './worker';
+import type { Paths } from '../paths';
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
-/**
- * Bridges the orchestrator's `terminal_intent.instructions` into the shape
- * the worker subgraph already consumes (the last `AIMessage` in
- * `state.messages`).
- *
- * @param state - Graph state. `terminal_intent` must be a delegate intent
- *   when this node runs — the `routeTerminalIntent` edge already branches on
- *   that.
- *
- * @remarks
- * Keeps the worker's `extractInstructions` contract unchanged: the worker
- * walks `state.messages` backwards for the most recent `AIMessage`. The
- * orchestrator writes its decision to `state.terminal_intent` (not to
- * `messages`), so this thin bridge translates between the two shapes. Any
- * future worker rewrite that reads from `terminal_intent` directly can
- * delete this node.
- */
 async function delegateBridgeNode(
   state: GraphStateType
 ): Promise<Partial<GraphStateType>> {
@@ -46,17 +30,14 @@ async function delegateBridgeNode(
 // ============================================================================
 
 /**
- * Builds the parent BetterVibes graph. Returns an uncompiled `StateGraph` so
- * callers (CLI, tests) can pass their own checkpointer at compile time.
- *
- * @remarks
- * Topology per spec §4.2. Interrupt nodes (`human_review`, `clarify`) pause
- * via dynamic `interrupt()` calls rather than static `interruptBefore` — the
- * runner sees `GraphInterrupt` thrown and surfaces it to the caller. A
- * checkpointer is required for interrupt-resume behavior; `compile()`
- * without one still works for non-interrupt paths (useful in tests).
+ * Builds the parent BetterVibes graph bound to the resolved Paths. Returns an
+ * uncompiled `StateGraph` so callers (CLI, tests) can pass their own
+ * checkpointer at compile time.
  */
-export function buildBetterVibesGraph() {
+export function buildBetterVibesGraph(paths: Paths) {
+  const { fetchTaskNode, pushTaskNode } = makeFetchPushNodes(paths);
+  const workerSubgraph = buildWorkerSubgraph(paths);
+
   return new StateGraph(GraphState)
     .addNode('fetch_task', fetchTaskNode)
     .addNode('orchestrator', orchestratorNode)
