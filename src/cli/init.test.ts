@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -106,6 +106,65 @@ describe('runInit', () => {
     } finally {
       tmp.cleanup();
       elsewhere.cleanup();
+    }
+  });
+});
+
+// ============================================================================
+// runInit .gitignore handling (#7)
+// ============================================================================
+
+describe('runInit .gitignore handling', () => {
+  const ENTRY = 'bv_orchestration/checkpoint.sqlite*';
+
+  async function init(dir: string) {
+    const stdio = makeStdio();
+    const exit = await runInit({
+      projectRootArg: dir,
+      cwd: dir,
+      stdout: stdio.stdout,
+      stderr: stdio.stderr,
+    });
+    return { exit, stdout: stdio.getStdout() };
+  }
+
+  it('creates .gitignore with the entry when none exists', async () => {
+    const tmp = withTempDir();
+    try {
+      const { exit } = await init(tmp.dir);
+      expect(exit).toBe(0);
+      expect(readFileSync(join(tmp.dir, '.gitignore'), 'utf8')).toContain(ENTRY);
+    } finally {
+      tmp.cleanup();
+    }
+  });
+
+  it('appends to an existing .gitignore that lacks the entry', async () => {
+    const tmp = withTempDir();
+    try {
+      writeFileSync(join(tmp.dir, '.gitignore'), 'node_modules\n');
+      const { exit } = await init(tmp.dir);
+      expect(exit).toBe(0);
+      expect(readFileSync(join(tmp.dir, '.gitignore'), 'utf8')).toBe(
+        `node_modules\n${ENTRY}\n`
+      );
+    } finally {
+      tmp.cleanup();
+    }
+  });
+
+  it('is a no-op when the entry is already present', async () => {
+    const tmp = withTempDir();
+    try {
+      writeFileSync(join(tmp.dir, '.gitignore'), `foo\n${ENTRY}\n`);
+      const { exit, stdout } = await init(tmp.dir);
+      expect(exit).toBe(0);
+      expect(readFileSync(join(tmp.dir, '.gitignore'), 'utf8')).toBe(
+        `foo\n${ENTRY}\n`
+      );
+      expect(stdout).toContain('already ignores');
+    } finally {
+      tmp.cleanup();
     }
   });
 });

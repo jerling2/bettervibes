@@ -27,6 +27,11 @@ criterion against the current state. If it contains a "Touches" section,
 inspect those files/modules for prior implementation. Otherwise reason from
 the task description as a whole.
 
+Before creating any new package, workspace, or config file, check whether a
+sibling already serves the same purpose (e.g. an existing package under
+\`packages/\`, or an existing tsconfig/eslint config). Extend or align with
+the existing one rather than adding a duplicate that competes with it.
+
 If you judge the work is already in place, do NOT redo it. Write your report
 to the report path with the heading "No-op: already complete" followed by a
 short evidence summary (which criteria are satisfied, which files contain
@@ -48,8 +53,12 @@ this structure (matches \`docs/templates/WORKER_REPORT_TEMPLATE.md\`):
 model: <AI model name>
 prd-source: <path relative to project root>
 date: YYYY-MM-DD
-status: red | green
+self_assessment: red | green
 ---
+
+<!-- self_assessment is YOUR recommendation (red = redlight, green = greenlight),
+not the reviewer's verdict. The reviewer's decision is recorded by where the
+task ends up (stage = redlit, done = greenlit), never written back here. -->
 
 # Worker Report: <feature-slug>
 

@@ -177,6 +177,7 @@ describe('parseArgs', () => {
       mode: 'run',
       task_id: 'T-01',
       include: [],
+      force: false,
     });
   });
 
@@ -205,6 +206,7 @@ describe('parseArgs', () => {
       mode: 'run',
       task_id: 'T-01',
       include: ['src/foo.ts'],
+      force: false,
     });
   });
 
@@ -215,6 +217,27 @@ describe('parseArgs', () => {
       mode: 'run',
       task_id: 'T-01',
       include: ['a.ts', 'b.ts', 'c.ts'],
+      force: false,
+    });
+  });
+
+  it('accepts `run <T-NN> --force`', () => {
+    expect(parseArgs(['run', 'T-01', '--force'])).toEqual({
+      mode: 'run',
+      task_id: 'T-01',
+      include: [],
+      force: true,
+    });
+  });
+
+  it('accepts `--include` paths together with `--force`', () => {
+    expect(
+      parseArgs(['run', 'T-01', '--include', 'a.ts', 'b.ts', '--force'])
+    ).toEqual({
+      mode: 'run',
+      task_id: 'T-01',
+      include: ['a.ts', 'b.ts'],
+      force: true,
     });
   });
 
@@ -458,6 +481,68 @@ describe('runCli — run mode', () => {
     expect(exit).toBe(1);
     expect(stdio.getStderr()).toMatch(/Include file not found: does-not-exist\.ts/);
     expect(stdio.getStdoutLines()).toEqual([]);
+  });
+});
+
+// ============================================================================
+// runCli — operator-owned guard (#9)
+// ============================================================================
+
+describe('runCli — operator-owned guard', () => {
+  const OPERATOR_BODY =
+    '---\nstatus: new\n---\n# Task: dns\n\n## Touches\n' +
+    '- Cloudflare DNS zone for goodgesture.app\n' +
+    '- Firebase Hosting custom domain\n';
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    setupFs();
+    // The task waiting in tasks/new has only external-system Touches.
+    mockReadFile.mockImplementation((p) => {
+      const s = String(p);
+      if (s.includes('tasks/new')) return Promise.resolve(OPERATOR_BODY);
+      if (s.includes('tasks/stage')) return Promise.resolve(STAGED_TASK_BODY);
+      return Promise.resolve(TASK_BODY);
+    });
+  });
+
+  it('refuses an operator-owned task with exit 2 and a refused event', async () => {
+    const stdio = makeStdio();
+    const exit = await runCli(
+      makeDeps({
+        argv: ['run', TASK_ID],
+        stdio,
+        checkpointer: new MemorySaver(),
+      })
+    );
+    expect(exit).toBe(2);
+    const lines = stdio.getStdoutLines().map((l) => JSON.parse(l));
+    expect(lines).toEqual([
+      {
+        status: 'refused',
+        reason: 'operator_owned',
+        task_id: TASK_ID,
+        message: expect.stringMatching(/operator-owned/),
+      },
+    ]);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('bypasses the guard with --force and runs the task', async () => {
+    mockQuery.mockImplementation(queryInvokingTool('mark_done', {}));
+    const stdio = makeStdio();
+    const exit = await runCli(
+      makeDeps({
+        argv: ['run', TASK_ID, '--force'],
+        stdio,
+        checkpointer: new MemorySaver(),
+      })
+    );
+    expect(exit).toBe(0);
+    const lines = stdio.getStdoutLines().map((l) => JSON.parse(l));
+    expect(lines).toEqual([
+      { status: 'done', task_id: TASK_ID, iterations: 0 },
+    ]);
   });
 });
 

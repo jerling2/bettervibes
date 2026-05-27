@@ -44,8 +44,16 @@ export async function nextWrIteration(reportsDir: string): Promise<number> {
   return max + 1;
 }
 
+/**
+ * Local-timezone `YYYY-MM-DD`. Uses the Date's local calendar components (not
+ * UTC) so report filenames and `date:` fields track the operator's workday;
+ * `toISOString()` would roll a day early for operators west of UTC.
+ */
 export function todayYmd(d: Date = new Date()): string {
-  return d.toISOString().slice(0, 10);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 const TASK_HEADING_RE = /^#\s+Task:\s*(.+?)\s*$/m;

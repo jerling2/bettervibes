@@ -4,7 +4,7 @@ date: YYYY-MM-DD
 prd-source: <path relative to project root, e.g., docs/prds/PRD-NN-<slug>-v1.md>
 worker-reports: []
 status: new | stage | done
-idempotency_check: false
+idempotency_check: true
 ---
 
 # Task: <slug>

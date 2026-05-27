@@ -7,6 +7,7 @@ import {
   formatWrId,
   makeCommitTask,
   nextWrIteration,
+  todayYmd,
 } from './commitTask';
 import { buildPaths } from '../paths';
 
@@ -84,6 +85,18 @@ describe('nextWrIteration', () => {
     mockReaddir.mockRejectedValue(eperm);
 
     await expect(nextWrIteration(PATHS.reports)).rejects.toThrow('EPERM');
+  });
+});
+
+describe('todayYmd', () => {
+  it('formats the local calendar date, not UTC', () => {
+    // 2026-05-18 23:30 local. For any operator west of UTC the UTC date here
+    // is already 2026-05-19, but todayYmd must report the local day.
+    expect(todayYmd(new Date(2026, 4, 18, 23, 30, 0))).toBe('2026-05-18');
+  });
+
+  it('zero-pads single-digit month and day', () => {
+    expect(todayYmd(new Date(2026, 0, 5, 9, 0, 0))).toBe('2026-01-05');
   });
 });
 

@@ -92,6 +92,12 @@ export const CliOutput = z.union([
     status: z.literal('no_active_task'),
     message: z.string(),
   }),
+  z.object({
+    status: z.literal('refused'),
+    reason: z.literal('operator_owned'),
+    task_id: z.string(),
+    message: z.string(),
+  }),
 ]);
 
 export type CliOutputType = z.infer<typeof CliOutput>;

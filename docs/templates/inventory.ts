@@ -22,6 +22,7 @@ interface Row {
   is_done: string;
   date_added: string;
   date_finished: string;
+  iterations: string;
 }
 
 interface WorkerReport {
@@ -29,7 +30,8 @@ interface WorkerReport {
   date: string;
 }
 
-const HEADER = 'task_id,task_name,prd_source,is_done,date_added,date_finished';
+const HEADER =
+  'task_id,task_name,prd_source,is_done,date_added,date_finished,iterations';
 const COLUMNS: Array<keyof Row> = [
   'task_id',
   'task_name',
@@ -37,6 +39,7 @@ const COLUMNS: Array<keyof Row> = [
   'is_done',
   'date_added',
   'date_finished',
+  'iterations',
 ];
 
 const TASK_FILENAME = /^T-(\d+)-(\d{4}-\d{2}-\d{2})\.md$/;
@@ -189,9 +192,11 @@ async function deriveRow(
   const status = frontmatterString(data, 'status');
   const is_done = status === 'done' ? 'true' : 'false';
 
+  const refs = frontmatterArray(data, 'worker-reports');
+  const iterations = String(refs.length);
+
   let date_finished = '';
   if (is_done === 'true') {
-    const refs = frontmatterArray(data, 'worker-reports');
     const dates: string[] = [];
     for (const ref of refs) {
       const idMatch = ref.match(WR_ID_PREFIX);
@@ -213,7 +218,15 @@ async function deriveRow(
     }
   }
 
-  return { task_id, task_name, prd_source, is_done, date_added, date_finished };
+  return {
+    task_id,
+    task_name,
+    prd_source,
+    is_done,
+    date_added,
+    date_finished,
+    iterations,
+  };
 }
 
 function csvEscape(cell: string): string {
