@@ -37,6 +37,10 @@ export async function clearThread(
       db.prepare('DELETE FROM checkpoints WHERE thread_id = ?').run(tid);
     });
     tx(threadId);
+    // Fold the WAL back into the main db and shrink it. The DELETEs above
+    // free rows but leave their pages in the WAL; without this the WAL grows
+    // unbounded across tasks (it can exceed the main db's size).
+    db.pragma('wal_checkpoint(TRUNCATE)');
     return;
   }
   if (saver instanceof MemorySaver) {

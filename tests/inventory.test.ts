@@ -80,7 +80,7 @@ function writeReport(bvDir: string, filename: string): void {
 }
 
 const HEADER =
-  'task_id,task_name,prd_source,is_done,date_added,date_finished';
+  'task_id,task_name,prd_source,is_done,date_added,date_finished,iterations';
 
 // ============================================================================
 // inventory.ts (vendored regeneration script)
@@ -116,9 +116,9 @@ describe('inventory.ts', () => {
       expect(result.csv).toBe(
         [
           HEADER,
-          'T-00,name-zero,,false,2026-01-01,',
-          'T-01,name-one,foo.spec.v1,false,2026-01-02,',
-          'T-02,name-two,bar.spec.v2,true,2026-01-03,2026-01-04',
+          'T-00,name-zero,,false,2026-01-01,,0',
+          'T-01,name-one,foo.spec.v1,false,2026-01-02,,0',
+          'T-02,name-two,bar.spec.v2,true,2026-01-03,2026-01-04,1',
           '',
         ].join('\n')
       );
@@ -197,11 +197,11 @@ describe('inventory.ts', () => {
       const t00First = firstLines.find((l) => l.startsWith('T-00,'));
       const t00Second = secondLines.find((l) => l.startsWith('T-00,'));
       expect(t00First).toBe(t00Second);
-      expect(t00First).toBe('T-00,name-zero,,false,2026-01-01,');
+      expect(t00First).toBe('T-00,name-zero,,false,2026-01-01,,0');
 
       // T-01 row must have flipped to done with date_finished populated.
       const t01Second = secondLines.find((l) => l.startsWith('T-01,'));
-      expect(t01Second).toBe('T-01,name-one,,true,2026-01-02,2026-01-05');
+      expect(t01Second).toBe('T-01,name-one,,true,2026-01-02,2026-01-05,1');
 
       // Sanity: the file did change between runs.
       expect(Buffer.compare(firstBytes, secondBytes)).not.toBe(0);

@@ -2,8 +2,13 @@
 model: <AI model, e.g., Claude Opus 4.7>
 prd-source: <path relative to project root, e.g., docs/prds/PRD-NN-<slug>-v1.md>
 date: YYYY-MM-DD
-status: red | green
+self_assessment: red | green
 ---
+
+<!-- `self_assessment` is the worker's own recommendation (red = redlight,
+green = greenlight), NOT the reviewer's verdict. The reviewer's greenlight/
+redlight is recorded by the task's location (stage vs done), never written
+back into this report. -->
 
 # Worker Report: <feature-slug>
 

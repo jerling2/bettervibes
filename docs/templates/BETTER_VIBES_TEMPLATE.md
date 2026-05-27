@@ -42,6 +42,27 @@ A task has one location at a time. It can accumulate multiple worker reports
 A redlight does not move the task; it stays in `stage/` and the array grows
 on the next run.
 
+## Worker reports
+
+Each iteration writes one report to `logs/worker-reports/WR-NN-<slug>-YYYY-MM-DD.md`
+with this frontmatter:
+
+```
+---
+model: <AI model name>
+prd-source: <path relative to project root>
+date: YYYY-MM-DD            # operator's local calendar date
+self_assessment: red | green
+---
+```
+
+`self_assessment` is the **worker's own recommendation** (`green` = recommend
+greenlight, `red` = recommend redlight) — it is *not* the reviewer's verdict.
+The reviewer's actual greenlight/redlight is recorded by where the task ends up
+(`tasks/stage/` = redlit and awaiting another pass, `tasks/done/` = greenlit);
+it is never written back into the report. So a report's `self_assessment: green`
+does not mean the iteration was accepted — check the task's location for that.
+
 ## PRDs
 
 Tasks reference their source PRD via the `prd-source` frontmatter field — a

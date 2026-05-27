@@ -8,6 +8,8 @@ import { PermissionGate } from '../graph/permissionGate';
 import { CLAUDE_CODE_DEFAULT_TOOLS } from '../graph/worker';
 import type { GraphStateType } from '../graph/state';
 import { makeIncludeFiles } from '../tools/includeFiles';
+import { makeFetchTask } from '../tools/fetchTask';
+import { isOperatorOwned } from '../tools/touches';
 import type { Paths } from '../paths';
 import {
   CliOutput,
@@ -33,7 +35,7 @@ export interface RunCliDeps {
 }
 
 type ParsedArgs =
-  | { mode: 'run'; task_id: string; include: string[] }
+  | { mode: 'run'; task_id: string; include: string[]; force: boolean }
   | { mode: 'resume' }
   | { mode: 'invalid'; message: string };
 
@@ -45,17 +47,38 @@ export const THREAD_ID = 'bettervibes-main';
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const usage =
-    'Usage:\n  bettervibes init [--project-root <path>]\n  bettervibes inventory-sync [--project-root <path>]\n  bettervibes run <T-NN> [--include <path1> [<path2> ...]] [--project-root <path>]\n  bettervibes resume [--project-root <path>]';
+    'Usage:\n  bettervibes init [--project-root <path>]\n  bettervibes inventory-sync [--project-root <path>]\n  bettervibes run <T-NN> [--include <path1> [<path2> ...]] [--force] [--project-root <path>]\n  bettervibes resume [--project-root <path>]';
   if (argv[0] === 'run' && argv.length >= 2 && argv[1].length > 0) {
     const task_id = argv[1];
     const rest = argv.slice(2);
-    if (rest.length === 0) {
-      return { mode: 'run', task_id, include: [] };
+    const include: string[] = [];
+    let force = false;
+    let i = 0;
+    while (i < rest.length) {
+      const tok = rest[i];
+      if (tok === '--force') {
+        force = true;
+        i++;
+        continue;
+      }
+      if (tok === '--include') {
+        i++;
+        let consumed = 0;
+        while (
+          i < rest.length &&
+          rest[i] !== '--force' &&
+          rest[i] !== '--include'
+        ) {
+          include.push(rest[i]);
+          i++;
+          consumed++;
+        }
+        if (consumed === 0) return { mode: 'invalid', message: usage };
+        continue;
+      }
+      return { mode: 'invalid', message: usage };
     }
-    if (rest[0] === '--include' && rest.length >= 2) {
-      return { mode: 'run', task_id, include: rest.slice(1) };
-    }
-    return { mode: 'invalid', message: usage };
+    return { mode: 'run', task_id, include, force };
   }
   if (argv.length === 1 && argv[0] === 'resume') {
     return { mode: 'resume' };
@@ -218,6 +241,37 @@ export async function runCli(deps: RunCliDeps): Promise<number> {
   if (args.mode === 'invalid') {
     deps.stderr.write(`${args.message}\n`);
     return 2;
+  }
+
+  // Operator-owned guard: a task whose `## Touches` names only external
+  // systems (DNS, dashboards) can't be satisfied by a worker. Refuse before
+  // staging or invoking the graph, unless `--force`. A missing/unreadable
+  // task is left to the graph to surface with its usual error.
+  if (args.mode === 'run' && !args.force) {
+    let body: string | null = null;
+    try {
+      const readTaskFile = makeFetchTask(deps.paths);
+      ({ body } = await readTaskFile(args.task_id));
+    } catch {
+      body = null;
+    }
+    if (body !== null && isOperatorOwned(body)) {
+      const message =
+        `${args.task_id}: every \`## Touches\` entry names an external system ` +
+        `and none name a repo file path — this task looks operator-owned. ` +
+        `Refusing to delegate to a worker; re-run with --force to override.`;
+      writeJsonLine(
+        deps.stdout,
+        CliOutput.parse({
+          status: 'refused',
+          reason: 'operator_owned',
+          task_id: args.task_id,
+          message,
+        })
+      );
+      deps.stderr.write(`warning: ${message}\n`);
+      return 2;
+    }
   }
 
   const compiled = deps.buildGraph().compile({
